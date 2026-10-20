@@ -30,6 +30,30 @@ use crate::{
 
 const PICKER_THRESHOLD: usize = 5;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepDirection {
+    Increase,
+    Decrease,
+}
+
+impl StepDirection {
+    /// Returns the index to select next among `len` ordered values, or `None` when
+    /// already at the end in this direction. An unknown current value starts at the first one.
+    pub fn next_index(self, current_index: Option<usize>, len: usize) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        let Some(current_index) = current_index else {
+            return Some(0);
+        };
+        let next_index = match self {
+            StepDirection::Increase => current_index + 1,
+            StepDirection::Decrease => current_index.checked_sub(1)?,
+        };
+        (next_index < len).then_some(next_index)
+    }
+}
+
 pub struct ConfigOptionsView {
     config_options: Rc<dyn AgentSessionConfigOptions>,
     selectors: Vec<Entity<ConfigOptionSelector>>,
@@ -112,6 +136,45 @@ impl ConfigOptionsView {
             self.agent_server.clone(),
             config_id,
             next_value,
+            self.fs.clone(),
+            cx,
+        )
+        .detach_and_log_err(cx);
+
+        true
+    }
+
+    /// Moves the first select option of `category` one value up or down, stopping at
+    /// either end instead of wrapping. Returns `false` when no such option exists.
+    pub fn step_category_option(
+        &mut self,
+        category: acp::SessionConfigOptionCategory,
+        direction: StepDirection,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(config_id) = self.first_config_option_id_matching(category, |option| {
+            matches!(option.kind, acp::SessionConfigKind::Select(_))
+        }) else {
+            return false;
+        };
+
+        let options = extract_options(&self.config_options, &config_id);
+        let current_value = get_current_select_value(&self.config_options, &config_id);
+        let current_index = current_value
+            .as_ref()
+            .and_then(|current| options.iter().position(|option| &option.value == current));
+        let Some(next_index) = direction.next_index(current_index, options.len()) else {
+            return true;
+        };
+        let Some(next_option) = options.get(next_index) else {
+            return true;
+        };
+
+        set_config_option_and_default(
+            self.config_options.clone(),
+            self.agent_server.clone(),
+            config_id,
+            acp::SessionConfigOptionValue::id(next_option.value.clone()),
             self.fs.clone(),
             cx,
         )
@@ -1144,6 +1207,19 @@ mod tests {
     use parking_lot::Mutex;
     use project::{AgentId, Project};
     use std::{any::Any, cell::RefCell};
+
+    #[test]
+    fn test_step_direction_stops_at_ends() {
+        use StepDirection::{Decrease, Increase};
+
+        assert_eq!(Increase.next_index(Some(0), 3), Some(1));
+        assert_eq!(Increase.next_index(Some(2), 3), None);
+        assert_eq!(Decrease.next_index(Some(2), 3), Some(1));
+        assert_eq!(Decrease.next_index(Some(0), 3), None);
+        assert_eq!(Increase.next_index(None, 3), Some(0));
+        assert_eq!(Decrease.next_index(None, 3), Some(0));
+        assert_eq!(Increase.next_index(None, 0), None);
+    }
 
     #[gpui::test]
     fn config_defaults_wait_for_authoritative_response(cx: &mut TestAppContext) {
