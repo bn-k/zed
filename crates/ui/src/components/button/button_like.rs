@@ -6,7 +6,7 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
-use crate::{DynamicSpacing, ElevationIndex, prelude::*};
+use crate::{DynamicSpacing, ElevationIndex, prelude::*, utils::calculate_contrast_ratio};
 
 /// A trait for buttons that can be Selected. Enables setting the [`ButtonStyle`] of a button when it is selected.
 pub trait SelectableButton: Toggleable {
@@ -66,11 +66,39 @@ pub enum TintColor {
     Error,
     Warning,
     Success,
+    /// A solid background in the given color, with black or white text,
+    /// whichever reads better on it.
+    Custom(Hsla),
 }
 
 impl TintColor {
+    /// The label color that the tint is drawn with.
+    pub fn label_color(self, cx: &App) -> Hsla {
+        match self {
+            TintColor::Custom(background) => {
+                let (black, white) = (gpui::black(), gpui::white());
+                if calculate_contrast_ratio(black, background)
+                    >= calculate_contrast_ratio(white, background)
+                {
+                    black
+                } else {
+                    white
+                }
+            }
+            TintColor::Accent | TintColor::Error | TintColor::Warning | TintColor::Success => {
+                cx.theme().colors().text
+            }
+        }
+    }
+
     fn button_like_style(self, cx: &mut App) -> ButtonLikeStyles {
         match self {
+            TintColor::Custom(background) => ButtonLikeStyles {
+                background,
+                border_color: background,
+                label_color: self.label_color(cx),
+                icon_color: self.label_color(cx),
+            },
             TintColor::Accent => ButtonLikeStyles {
                 background: cx.theme().status().info_background,
                 border_color: cx.theme().status().info_border,
@@ -106,6 +134,7 @@ impl From<TintColor> for Color {
             TintColor::Error => Color::Error,
             TintColor::Warning => Color::Warning,
             TintColor::Success => Color::Success,
+            TintColor::Custom(color) => Color::Custom(color),
         }
     }
 }

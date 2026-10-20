@@ -1413,6 +1413,28 @@
     //
     // Default: true
     "show_merge_conflict_indicator": true,
+    // How to color the model and thinking effort labels below the message editor.
+    // Without custom colors, fast models are tinted green, frontier models blue,
+    // and the effort turns yellow at "high", then shades toward red at the maximum.
+    "label_colors": {
+      "model": {
+        // Whether the color applies to the label's text ("text") or fills a tag
+        // behind it ("tag").
+        "style": "text",
+        // Colors that replace the built-in ones. A key matches when its words
+        // appear in the model's name or id, ignoring case and punctuation; the
+        // longest matching key wins. For example:
+        //   "colors": { "opus": "#61afef", "gpt-5 mini": "#98c379" }
+        "colors": {},
+      },
+      "effort": {
+        "style": "text",
+        // Colors that replace the built-in ones, keyed by the level's name or
+        // value, ignoring case. For example:
+        //   "colors": { "high": "#e5c07b", "max": "#e06c75" }
+        "colors": {},
+      },
+    },
   },
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,
