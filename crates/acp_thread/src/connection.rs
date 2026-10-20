@@ -989,6 +989,7 @@ mod test_support {
         agent_id: AgentId,
         telemetry_id: SharedString,
         prompt_capabilities_rx: watch::Receiver<acp_v2::PromptCapabilities>,
+        session_config_options: Option<StubSessionConfigOptions>,
     }
 
     enum StubPromptUpdate {
@@ -1043,6 +1044,7 @@ mod test_support {
                         .audio(acp_v2::PromptAudioCapabilities::new())
                         .embedded_context(acp_v2::PromptEmbeddedContextCapabilities::new()),
                 ),
+                session_config_options: None,
             }
         }
 
@@ -1081,6 +1083,16 @@ mod test_support {
 
         pub fn with_auth_methods(mut self, methods: Vec<acp_v2::AuthMethod>) -> Self {
             self.auth_methods = methods;
+            self
+        }
+
+        pub fn with_session_config_options(
+            mut self,
+            config_options: Vec<acp_v2::SessionConfigOption>,
+        ) -> Self {
+            self.session_config_options = Some(StubSessionConfigOptions {
+                options: Arc::new(Mutex::new(config_options)),
+            });
             self
         }
 
@@ -1293,6 +1305,16 @@ mod test_support {
             _session_id: &acp_v2::SessionId,
         ) -> Option<Rc<dyn AgentModelSelector>> {
             Some(self.model_selector_impl())
+        }
+
+        fn session_config_options(
+            &self,
+            _session_id: &acp_v2::SessionId,
+            _cx: &App,
+        ) -> Option<Rc<dyn AgentSessionConfigOptions>> {
+            self.session_config_options
+                .clone()
+                .map(|config_options| Rc::new(config_options) as Rc<dyn AgentSessionConfigOptions>)
         }
 
         fn new_session(
@@ -1635,6 +1657,48 @@ mod test_support {
 
         fn selected_model(&self, _cx: &mut App) -> Task<Result<AgentModelInfo>> {
             Task::ready(Ok(self.selected_model.lock().clone()))
+        }
+    }
+
+    /// Select config options whose state is shared by every handle, so values set
+    /// through one session's provider are visible to later reads.
+    #[derive(Clone)]
+    struct StubSessionConfigOptions {
+        options: Arc<Mutex<Vec<acp_v2::SessionConfigOption>>>,
+    }
+
+    impl AgentSessionConfigOptions for StubSessionConfigOptions {
+        fn config_options(&self) -> Vec<acp_v2::SessionConfigOption> {
+            self.options.lock().clone()
+        }
+
+        fn set_config_option(
+            &self,
+            config_id: acp_v2::SessionConfigId,
+            value: acp_v2::SessionConfigOptionValue,
+            _cx: &mut App,
+        ) -> Task<Result<Vec<acp_v2::SessionConfigOption>>> {
+            let mut options = self.options.lock();
+            let option = options
+                .iter_mut()
+                .find(|option| option.config_id == config_id);
+            match (option.map(|option| &mut option.kind), value) {
+                (
+                    Some(acp_v2::SessionConfigKind::Select(select)),
+                    acp_v2::SessionConfigOptionValue::Id { value },
+                ) => select.current_value = value,
+                (
+                    Some(acp_v2::SessionConfigKind::Boolean(boolean)),
+                    acp_v2::SessionConfigOptionValue::Boolean { value },
+                ) => boolean.current_value = value,
+                _ => {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "unsupported config option {}",
+                        config_id.0
+                    )));
+                }
+            }
+            Task::ready(Ok(options.clone()))
         }
     }
 
