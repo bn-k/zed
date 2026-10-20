@@ -18242,6 +18242,55 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_cycle_thinking_effort_while_generating(cx: &mut TestAppContext) {
+        init_test(cx);
+        let connection = StubAgentConnection::new().with_session_config_options(vec![
+            acp_v2::SessionConfigOption::select(
+                "effort",
+                "Effort",
+                "low",
+                vec![
+                    acp_v2::SessionConfigSelectOption::new("low", "Low"),
+                    acp_v2::SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(acp_v2::SessionConfigOptionCategory::ThoughtLevel),
+        ]);
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+        let thread_view = active_thread(&conversation_view, cx);
+        let message_editor = message_editor(&conversation_view, cx);
+
+        let _finish_prompt = connection.defer_next_prompt_response();
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("hello", window, cx);
+        });
+        thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+        thread_view.read_with(cx, |view, cx| {
+            assert_eq!(view.thread.read(cx).status(), ThreadStatus::Generating);
+        });
+
+        cx.focus(&thread_view);
+        cx.dispatch_action(crate::CycleThinkingEffort);
+        cx.run_until_parked();
+
+        let session_id =
+            thread_view.read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
+        let effort = cx
+            .update(|_, cx| connection.session_config_options(&session_id, cx))
+            .expect("stub exposes config options")
+            .config_options()
+            .into_iter()
+            .find_map(|option| match option.kind {
+                acp_v2::SessionConfigKind::Select(select) => Some(select.current_value),
+                _ => None,
+            });
+        assert_eq!(effort, Some("high".into()));
+    }
+
+    #[gpui::test]
     async fn test_legacy_permission_shortcuts_do_not_skip_generic_requests(
         cx: &mut TestAppContext,
     ) {
