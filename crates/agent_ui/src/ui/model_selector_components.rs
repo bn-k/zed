@@ -295,3 +295,73 @@ impl RenderOnce for ModelSelectorTooltip {
             })
     }
 }
+
+/// Lays out `element` in a cell as wide as the widest of `sizers`, so it keeps the same width
+/// whichever value it currently shows. The sizers take part in layout but are never painted.
+pub fn with_width_of_widest(
+    element: impl IntoElement,
+    sizers: impl IntoIterator<Item = impl IntoElement>,
+) -> impl IntoElement {
+    div()
+        .grid()
+        .grid_cols_max_content(1)
+        .children(
+            sizers
+                .into_iter()
+                .map(|sizer| div().col_start(1).row_start(1).invisible().child(sizer)),
+        )
+        .child(div().col_start(1).row_start(1).child(element))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, point, px, size};
+    use settings::SettingsStore;
+
+    const LABELS: [&str; 3] = ["Low", "Medium", "Xhigh"];
+
+    struct TestTrigger {
+        shown: &'static str,
+        fixed_width: bool,
+    }
+
+    impl Render for TestTrigger {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let trigger = div()
+                .debug_selector(|| "trigger".into())
+                .child(Button::new("trigger", self.shown).width(relative(1.)));
+            h_flex().child(if self.fixed_width {
+                with_width_of_widest(trigger, LABELS.map(|label| Button::new(label, label)))
+                    .into_any_element()
+            } else {
+                trigger.into_any_element()
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn test_width_stays_that_of_the_widest_value(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let cx = cx.add_empty_window();
+
+        let mut trigger_width = |shown: &'static str, fixed_width: bool| {
+            cx.draw(point(px(0.), px(0.)), size(px(800.), px(100.)), |_, cx| {
+                cx.new(|_| TestTrigger { shown, fixed_width })
+                    .into_any_element()
+            });
+            cx.run_until_parked();
+            cx.debug_bounds("trigger")
+                .map(|bounds| bounds.size.width)
+                .expect("trigger is rendered")
+        };
+
+        let fixed_widths = LABELS.map(|label| trigger_width(label, true));
+        assert_eq!(fixed_widths, [fixed_widths[0]; 3]);
+        assert!(fixed_widths[0] > trigger_width("Low", false));
+    }
+}

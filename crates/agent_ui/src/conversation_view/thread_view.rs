@@ -27,7 +27,7 @@ use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
-    TerminalToolHeader,
+    TerminalToolHeader, with_width_of_widest,
 };
 use crate::unicode_confusables;
 
@@ -6159,29 +6159,40 @@ impl ThreadView {
             }
         });
 
-        let trigger = if standalone {
-            ButtonLike::new("effort-selector-trigger").child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::ThinkingMode)
-                            .size(IconSize::Small)
-                            .color(Color::Accent),
-                    )
+        let trigger_with_label = |id: ElementId, label: SharedString| {
+            if standalone {
+                ButtonLike::new(id).child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::ThinkingMode)
+                                .size(IconSize::Small)
+                                .color(Color::Accent),
+                        )
+                        .child(Label::new(label).size(LabelSize::Small).color(label_color))
+                        .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted)),
+                )
+            } else {
+                ButtonLike::new_rounded_right(id)
                     .child(Label::new(label).size(LabelSize::Small).color(label_color))
-                    .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted)),
-            )
-        } else {
-            ButtonLike::new_rounded_right("effort-selector-trigger")
-                .child(Label::new(label).size(LabelSize::Small).color(label_color))
-                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+            }
         };
 
-        PopoverMenu::new("effort-selector")
-            .trigger_with_tooltip(
-                trigger.selected_style(ButtonStyle::Tinted(TintColor::Accent)),
-                tooltip,
-            )
+        // Levels differ in length, and the selector must not resize (and shift its
+        // neighbors) when the effort changes.
+        let sizers = supported_effort_levels
+            .iter()
+            .map(|level| level.name.clone())
+            .enumerate()
+            .map(|(index, name)| trigger_with_label(("effort-selector-sizer", index).into(), name))
+            .collect::<Vec<_>>();
+        let trigger = trigger_with_label("effort-selector-trigger".into(), label)
+            .width(relative(1.))
+            .selected_style(ButtonStyle::Tinted(TintColor::Accent));
+
+        let popover = PopoverMenu::new("effort-selector")
+            .trigger_with_tooltip(trigger, tooltip)
             .menu(move |window, cx| {
                 Some(ContextMenu::build(window, cx, |mut menu, _window, _cx| {
                     menu = menu.header("Change Thinking Effort");
@@ -6252,7 +6263,9 @@ impl ThreadView {
                 x: px(0.0),
                 y: px(-2.0),
             })
-            .anchor(gpui::Anchor::BottomLeft)
+            .anchor(gpui::Anchor::BottomLeft);
+
+        with_width_of_widest(popover, sizers)
     }
 
     fn render_send_button(&self, cx: &mut Context<Self>) -> AnyElement {

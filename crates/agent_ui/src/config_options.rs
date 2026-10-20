@@ -22,7 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use util::ResultExt as _;
 use zed_actions::agent::ToggleModelSelector;
 
-use crate::ui::documentation_aside_side;
+use crate::ui::{documentation_aside_side, with_width_of_widest};
 use crate::{
     CycleFavoriteModels, CycleModeSelector, CycleThinkingEffort, ToggleProfileSelector,
     ToggleThinkingEffortMenu,
@@ -425,23 +425,48 @@ impl ConfigOptionSelector {
             IconName::ChevronDown
         };
 
-        let value_name = self.current_value_name();
-        let mut graphemes = value_name.graphemes(true);
-        let truncated = graphemes.by_ref().take(32).collect::<String>();
-        let display_name = if graphemes.next().is_some() {
-            format!("{truncated}…")
-        } else {
-            truncated
-        };
-
         Button::new(
             ElementId::Name(format!("config-option-{}", option.config_id.0).into()),
-            display_name,
+            truncated_display_name(&self.current_value_name()),
         )
         .label_size(LabelSize::Small)
         .color(Color::Muted)
         .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+        .when(has_fixed_width(&option), |button| {
+            button.width(relative(1.))
+        })
         .disabled(self.setting_value)
+    }
+
+    fn render_width_sizers(&self) -> Vec<Button> {
+        extract_options(&self.config_options, &self.config_id)
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                Button::new(
+                    ("config-option-sizer", index),
+                    truncated_display_name(&value.name),
+                )
+                .label_size(LabelSize::Small)
+                .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall))
+            })
+            .collect()
+    }
+}
+
+/// The thinking effort selector keeps the width of its widest value, so that changing the
+/// effort doesn't shift the controls next to it.
+fn has_fixed_width(option: &acp::SessionConfigOption) -> bool {
+    option.category == Some(acp::SessionConfigOptionCategory::ThoughtLevel)
+}
+
+fn truncated_display_name(name: &str) -> String {
+    let mut graphemes = name.graphemes(true);
+    let truncated = graphemes.by_ref().take(32).collect::<String>();
+    if graphemes.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 
@@ -532,7 +557,7 @@ impl Render for ConfigOptionSelector {
                     content.into_any()
                 });
 
-                PickerPopoverMenu::new(
+                let popover = PickerPopoverMenu::new(
                     picker,
                     trigger_button,
                     tooltip,
@@ -540,8 +565,13 @@ impl Render for ConfigOptionSelector {
                     cx,
                 )
                 .with_handle(picker_handle)
-                .render(window, cx)
-                .into_any_element()
+                .render(window, cx);
+
+                if has_fixed_width(&option) {
+                    with_width_of_widest(popover, self.render_width_sizers()).into_any_element()
+                } else {
+                    popover.into_any_element()
+                }
             }
             acp::SessionConfigKind::Boolean(boolean) => {
                 let option_id = option.config_id.clone();
