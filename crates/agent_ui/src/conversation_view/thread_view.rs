@@ -27,7 +27,7 @@ use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
-    TerminalToolHeader,
+    TerminalToolHeader, effort_level_color,
 };
 use crate::unicode_confusables;
 
@@ -6110,15 +6110,20 @@ impl ThreadView {
                 .cloned()
         });
 
-        let label = selected
-            .clone()
-            .or(default_effort_level)
-            .map_or("Select Effort".into(), |effort| effort.name);
+        let effective_effort = selected.clone().or(default_effort_level);
+        let effort_color = effective_effort.as_ref().and_then(|effort| {
+            let level_values = supported_effort_levels
+                .iter()
+                .map(|level| level.value.as_ref())
+                .collect::<Vec<_>>();
+            effort_level_color(&level_values, &effort.value, cx)
+        });
+        let label = effective_effort.map_or("Select Effort".into(), |effort| effort.name);
 
         let (label_color, icon) = if self.thinking_effort_menu_handle.is_deployed() {
             (Color::Accent, IconName::ChevronUp)
         } else {
-            (Color::Muted, IconName::ChevronDown)
+            (effort_color.unwrap_or(Color::Muted), IconName::ChevronDown)
         };
 
         let focus_handle = self.message_editor.focus_handle(cx);

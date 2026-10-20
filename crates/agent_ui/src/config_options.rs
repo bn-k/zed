@@ -22,7 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use util::ResultExt as _;
 use zed_actions::agent::ToggleModelSelector;
 
-use crate::ui::documentation_aside_side;
+use crate::ui::{documentation_aside_side, effort_level_color, model_tier_color};
 use crate::{
     CycleFavoriteModels, CycleModeSelector, CycleThinkingEffort, ToggleProfileSelector,
     ToggleThinkingEffortMenu,
@@ -396,6 +396,27 @@ impl ConfigOptionSelector {
         }
     }
 
+    fn current_value_color(&self, option: &acp::SessionConfigOption, cx: &App) -> Option<Color> {
+        let acp::SessionConfigKind::Select(select) = &option.kind else {
+            return None;
+        };
+        match option.category.as_ref()? {
+            acp::SessionConfigOptionCategory::ThoughtLevel => {
+                let options = extract_options(&self.config_options, &self.config_id);
+                let level_values = options
+                    .iter()
+                    .map(|option| option.value.0.as_ref())
+                    .collect::<Vec<_>>();
+                effort_level_color(&level_values, &select.current_value.0, cx)
+            }
+            acp::SessionConfigOptionCategory::Model => {
+                model_tier_color(&self.current_value_name(), cx)
+                    .or_else(|| model_tier_color(&select.current_value.0, cx))
+            }
+            _ => None,
+        }
+    }
+
     fn handles_category_keybindings(&self, category: &acp::SessionConfigOptionCategory) -> bool {
         self.config_options
             .config_options()
@@ -407,7 +428,7 @@ impl ConfigOptionSelector {
             .is_some_and(|option| option.config_id == self.config_id)
     }
 
-    fn render_trigger_button(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Button {
+    fn render_trigger_button(&self, _window: &mut Window, cx: &mut Context<Self>) -> Button {
         let Some(option) = self.current_option() else {
             return Button::new("config-option-trigger", "Unknown")
                 .label_size(LabelSize::Small)
@@ -425,6 +446,10 @@ impl ConfigOptionSelector {
             IconName::ChevronDown
         };
 
+        let label_color = self
+            .current_value_color(&option, cx)
+            .unwrap_or(Color::Muted);
+
         let value_name = self.current_value_name();
         let mut graphemes = value_name.graphemes(true);
         let truncated = graphemes.by_ref().take(32).collect::<String>();
@@ -439,7 +464,7 @@ impl ConfigOptionSelector {
             display_name,
         )
         .label_size(LabelSize::Small)
-        .color(Color::Muted)
+        .color(label_color)
         .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
         .disabled(self.setting_value)
     }

@@ -5,7 +5,7 @@ use gpui::{Entity, FocusHandle};
 use picker::popover_menu::PickerPopoverMenu;
 use ui::{PopoverMenuHandle, Tooltip, prelude::*};
 
-use crate::ui::ModelSelectorTooltip;
+use crate::ui::{ModelSelectorTooltip, model_tier_color};
 use crate::{ModelSelector, model_selector::acp_model_selector};
 
 pub struct ModelSelectorPopover {
@@ -59,6 +59,17 @@ impl Render for ModelSelectorPopover {
         } else {
             (Color::Muted, IconName::ChevronDown)
         };
+        let label_color = if self.menu_handle.is_deployed() {
+            color
+        } else {
+            model
+                .as_ref()
+                .and_then(|model| {
+                    model_tier_color(&model.name, cx)
+                        .or_else(|| model_tier_color(model.id.as_str(), cx))
+                })
+                .unwrap_or(color)
+        };
 
         let show_cycle_row = selector.delegate.favorites_count() > 1;
 
@@ -74,7 +85,7 @@ impl Render for ModelSelectorPopover {
             self.selector.clone(),
             Button::new("active-model", model_name)
                 .label_size(LabelSize::Small)
-                .color(color)
+                .color(label_color)
                 .when_some(model_icon, |this, icon| {
                     this.start_icon(
                         match icon {
