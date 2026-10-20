@@ -13203,9 +13203,6 @@ impl ThreadView {
     }
 
     fn step_thinking_effort(&mut self, direction: StepDirection, cx: &mut Context<Self>) {
-        if self.thread.read(cx).status() != ThreadStatus::Idle {
-            return;
-        }
         if let Some(config_options_view) = self.config_options_view.clone() {
             let handled = config_options_view.update(cx, |view, cx| {
                 view.step_category_option(
