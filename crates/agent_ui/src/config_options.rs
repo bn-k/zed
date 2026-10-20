@@ -269,17 +269,45 @@ impl ConfigOptionsView {
 }
 
 impl Render for ConfigOptionsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.selectors.is_empty() {
             return div().into_any_element();
         }
+
+        // Icon toggles lead so they sit next to the context usage indicator rather than
+        // between the labeled selectors.
+        let (icon_toggles, labeled_selectors): (Vec<_>, Vec<_>) = self
+            .selectors
+            .iter()
+            .cloned()
+            .partition(|selector| selector.read(cx).renders_as_icon());
 
         h_flex()
             .min_w_0()
             .flex_wrap()
             .gap_1()
-            .children(self.selectors.iter().cloned())
+            .children(icon_toggles)
+            .children(labeled_selectors)
             .into_any_element()
+    }
+}
+
+/// Boolean options that agents commonly expose, shown as a compact icon toggle instead of a
+/// labeled switch so they match the equivalent controls of the native agent.
+struct BooleanOptionIcons {
+    enabled: IconName,
+    disabled: IconName,
+}
+
+impl BooleanOptionIcons {
+    fn for_config_id(config_id: &acp::SessionConfigId) -> Option<Self> {
+        match config_id.0.as_ref() {
+            "fast" => Some(Self {
+                enabled: IconName::FastForward,
+                disabled: IconName::FastForwardOff,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -364,6 +392,13 @@ impl ConfigOptionSelector {
 
     fn config_id(&self) -> &acp::SessionConfigId {
         &self.config_id
+    }
+
+    fn renders_as_icon(&self) -> bool {
+        BooleanOptionIcons::for_config_id(&self.config_id).is_some()
+            && self
+                .current_option()
+                .is_some_and(|option| matches!(option.kind, acp::SessionConfigKind::Boolean(_)))
     }
 
     fn toggle_picker(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -565,7 +600,47 @@ impl Render for ConfigOptionSelector {
                 let config_options = self.config_options.clone();
                 let agent_server = self.agent_server.clone();
                 let fs = self.fs.clone();
+                let set_value = move |next_value: bool, cx: &mut App| {
+                    if !config_options.config_options().iter().any(|option| {
+                        option.config_id == config_id
+                            && matches!(&option.kind, acp::SessionConfigKind::Boolean(_))
+                    }) {
+                        return;
+                    }
+
+                    set_config_option_and_default(
+                        config_options.clone(),
+                        agent_server.clone(),
+                        config_id.clone(),
+                        acp::SessionConfigOptionValue::boolean(next_value),
+                        fs.clone(),
+                        cx,
+                    )
+                    .detach_and_log_err(cx);
+                };
                 let current_value = boolean.current_value;
+
+                if let Some(icons) = BooleanOptionIcons::for_config_id(&option_id) {
+                    let (icon, icon_color) = if current_value {
+                        (icons.enabled, Color::Accent)
+                    } else {
+                        (
+                            icons.disabled,
+                            Color::Custom(cx.theme().colors().icon_disabled.opacity(0.8)),
+                        )
+                    };
+                    return IconButton::new(
+                        ElementId::Name(format!("config-option-{}", option_id.0).into()),
+                        icon,
+                    )
+                    .icon_size(IconSize::Small)
+                    .icon_color(icon_color)
+                    .disabled(self.setting_value)
+                    .tooltip(tooltip)
+                    .on_click(move |_, _window, cx| set_value(!current_value, cx))
+                    .into_any_element();
+                }
+
                 let toggle_state = if current_value {
                     ToggleState::Selected
                 } else {
@@ -589,23 +664,7 @@ impl Render for ConfigOptionSelector {
                         .label_color(Color::Muted)
                         .disabled(self.setting_value)
                         .on_click(move |state, _window, cx| {
-                            if !config_options.config_options().iter().any(|option| {
-                                option.config_id == config_id
-                                    && matches!(&option.kind, acp::SessionConfigKind::Boolean(_))
-                            }) {
-                                return;
-                            }
-
-                            let next_value = matches!(state, ToggleState::Selected);
-                            set_config_option_and_default(
-                                config_options.clone(),
-                                agent_server.clone(),
-                                config_id.clone(),
-                                acp::SessionConfigOptionValue::boolean(next_value),
-                                fs.clone(),
-                                cx,
-                            )
-                            .detach_and_log_err(cx);
+                            set_value(matches!(state, ToggleState::Selected), cx)
                         }),
                     )
                     .into_any_element()
@@ -1394,6 +1453,38 @@ mod tests {
                 acp::SessionConfigOptionValue::id("manual")
             )]
         );
+    }
+
+    #[gpui::test]
+    fn only_known_boolean_options_render_as_icons(cx: &mut TestAppContext) {
+        let agent_server: Rc<dyn AgentServer> = Rc::new(TestAgentServer::default());
+        let config_options: Rc<dyn AgentSessionConfigOptions> =
+            Rc::new(TestSessionConfigOptions::new(vec![
+                acp::SessionConfigOption::boolean("web_search", "Web Search", false)
+                    .category(acp::SessionConfigOptionCategory::ModelConfig),
+                acp::SessionConfigOption::boolean("fast", "Fast mode", false)
+                    .category(acp::SessionConfigOptionCategory::ModelConfig),
+            ]));
+        let fs: Arc<dyn Fs> = FakeFs::new(cx.executor());
+        let cx = cx.add_empty_window();
+
+        let renders_as_icon = cx.update(|window, cx| {
+            ["web_search", "fast"].map(|config_id| {
+                let selector = cx.new(|cx| {
+                    ConfigOptionSelector::new(
+                        config_options.clone(),
+                        config_id.into(),
+                        agent_server.clone(),
+                        fs.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                selector.read(cx).renders_as_icon()
+            })
+        });
+
+        assert_eq!(renders_as_icon, [false, true]);
     }
 
     #[gpui::test]
