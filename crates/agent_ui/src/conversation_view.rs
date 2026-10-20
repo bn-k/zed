@@ -78,7 +78,7 @@ use workspace::{
 };
 use zed_actions::agent::{Chat, ToggleModelSelector};
 
-use super::config_options::ConfigOptionsView;
+use super::config_options::{ConfigOptionsView, StepDirection};
 use super::entry_view_state::EntryViewState;
 use crate::ModeSelector;
 use crate::ModelSelectorPopover;
@@ -96,12 +96,12 @@ use crate::ui::{AgentNotification, AgentNotificationEvent};
 use crate::{
     Agent, AgentDiffPane, AgentInitialContent, AgentPanel, AgentPanelEvent, AllowAlways, AllowOnce,
     AuthorizeToolCall, ClearMessageQueue, CycleFavoriteModels, CycleModeSelector,
-    CycleThinkingEffort, EditFirstQueuedMessage, ExpandMessageEditor, Follow, KeepAll, NewThread,
-    OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce, RemoveFirstQueuedMessage,
-    ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown, ScrollOutputPageUp,
-    ScrollOutputToBottom, ScrollOutputToNextMessage, ScrollOutputToPreviousMessage,
-    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleFastMode,
-    ToggleProfileSelector, ToggleSteerFirstQueuedMessage, ToggleThinkingEffortMenu,
+    CycleThinkingEffort, DecreaseThinkingEffort, EditFirstQueuedMessage, ExpandMessageEditor,
+    Follow, IncreaseThinkingEffort, KeepAll, NewThread, OpenAddContextMenu, OpenAgentDiff,
+    RejectAll, RejectOnce, RemoveFirstQueuedMessage, ScrollOutputLineDown, ScrollOutputLineUp,
+    ScrollOutputPageDown, ScrollOutputPageUp, ScrollOutputToBottom, ScrollOutputToNextMessage,
+    ScrollOutputToPreviousMessage, ScrollOutputToTop, SendImmediately, SendNextQueuedMessage,
+    ToggleFastMode, ToggleProfileSelector, ToggleSteerFirstQueuedMessage, ToggleThinkingEffortMenu,
     ToggleThinkingMode, UndoLastReject,
 };
 

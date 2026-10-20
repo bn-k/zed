@@ -380,6 +380,10 @@ actions!(
         ToggleThinkingMode,
         /// Cycles through available thinking effort levels for the current model.
         CycleThinkingEffort,
+        /// Raises the thinking effort to the next level, stopping at the highest one.
+        IncreaseThinkingEffort,
+        /// Lowers the thinking effort to the previous level, stopping at the lowest one.
+        DecreaseThinkingEffort,
         /// Toggles the thinking effort selector menu open or closed.
         ToggleThinkingEffortMenu,
         /// Toggles fast mode for models that support it.

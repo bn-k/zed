@@ -13202,7 +13202,32 @@ impl ThreadView {
         });
     }
 
-    fn cycle_native_agent_thinking_effort(&mut self, cx: &mut Context<Self>) {
+    fn step_thinking_effort(&mut self, direction: StepDirection, cx: &mut Context<Self>) {
+        if self.thread.read(cx).status() != ThreadStatus::Idle {
+            return;
+        }
+        if let Some(config_options_view) = self.config_options_view.clone() {
+            let handled = config_options_view.update(cx, |view, cx| {
+                view.step_category_option(
+                    acp_v2::SessionConfigOptionCategory::ThoughtLevel,
+                    direction,
+                    cx,
+                )
+            });
+            if handled {
+                return;
+            }
+        }
+        self.cycle_native_agent_thinking_effort(Some(direction), cx);
+    }
+
+    /// Without a direction, cycles through the effort levels and wraps around;
+    /// with one, steps up or down and stops at the highest or lowest level.
+    fn cycle_native_agent_thinking_effort(
+        &mut self,
+        direction: Option<StepDirection>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(thread) = self.as_native_thread(cx) else {
             return;
         };
@@ -13232,11 +13257,17 @@ impl ThreadView {
                 .iter()
                 .position(|level| level.value == current)
         });
-        let next_index = match current_index {
-            Some(index) => (index + 1) % effort_levels.len(),
-            None => 0,
+        let next_index = match (direction, current_index) {
+            (Some(direction), current_index) => {
+                direction.next_index(current_index, effort_levels.len())
+            }
+            (None, Some(index)) => Some((index + 1) % effort_levels.len()),
+            (None, None) => Some(0),
         };
-        let next_effort = effort_levels[next_index].value.to_string();
+        let Some(next_level) = next_index.and_then(|index| effort_levels.get(index)) else {
+            return;
+        };
+        let next_effort = next_level.value.to_string();
 
         thread.update(cx, |thread, cx| {
             thread.set_thinking_effort(Some(next_effort.clone()), cx);
@@ -13443,8 +13474,18 @@ impl Render for ThreadView {
                         return;
                     }
                 }
-                this.cycle_native_agent_thinking_effort(cx);
+                this.cycle_native_agent_thinking_effort(None, cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &IncreaseThinkingEffort, _window, cx| {
+                    this.step_thinking_effort(StepDirection::Increase, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &DecreaseThinkingEffort, _window, cx| {
+                    this.step_thinking_effort(StepDirection::Decrease, cx);
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &ToggleThinkingEffortMenu, window, cx| {
                     if this.thread.read(cx).status() != ThreadStatus::Idle {
