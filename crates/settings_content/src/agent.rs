@@ -10,7 +10,7 @@ use std::{
 
 use crate::ExtendingVec;
 
-use crate::DockPosition;
+use crate::{DockPosition, ThemeColor};
 
 /// Where to position the threads sidebar.
 #[derive(
@@ -95,6 +95,57 @@ pub enum ThinkingBlockDisplay {
     AlwaysExpanded,
     /// Thinking blocks are always collapsed by default.
     AlwaysCollapsed,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct AgentLabelColorsContent {
+    /// How to color the label of the selected model.
+    pub model: Option<AgentLabelColorContent>,
+    /// How to color the label of the selected thinking effort.
+    pub effort: Option<AgentLabelColorContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct AgentLabelColorContent {
+    /// Whether the color applies to the label's text or fills a tag behind it.
+    ///
+    /// Default: "text"
+    pub style: Option<AgentLabelStyle>,
+    /// Colors that replace the built-in ones, keyed by what they apply to.
+    ///
+    /// For models, a key matches when its words appear in the model's name or id,
+    /// ignoring case and punctuation (e.g. "opus" or "gpt-5 mini"); the longest
+    /// matching key wins. For thinking effort, a key matches the level's name or
+    /// value, ignoring case (e.g. "high" or "max").
+    ///
+    /// Default: {}
+    pub colors: Option<IndexMap<String, ThemeColor>>,
+}
+
+/// How a colored agent label is drawn.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLabelStyle {
+    /// The color applies to the label's text.
+    #[default]
+    Text,
+    /// The label is drawn on a background filled with the color.
+    Tag,
 }
 
 /// Threshold at which agent auto-compaction runs. See
@@ -394,6 +445,8 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub show_merge_conflict_indicator: Option<bool>,
+    /// How to color the model and thinking effort labels below the message editor.
+    pub label_colors: Option<AgentLabelColorsContent>,
     /// Per-tool permission rules for granular control over which tool actions
     /// require confirmation.
     ///

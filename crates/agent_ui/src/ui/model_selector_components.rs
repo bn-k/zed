@@ -1,6 +1,10 @@
-use gpui::{Action, ClickEvent, FocusHandle, prelude::*};
+use agent_settings::{AgentLabelStyle, AgentSettings};
+use gpui::{Action, ClickEvent, FocusHandle, Hsla, prelude::*};
 use language_model::DisabledReason;
-use ui::{Chip, ElevationIndex, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use settings::Settings as _;
+use ui::{
+    Chip, ElevationIndex, KeyBinding, ListItem, ListItemSpacing, TintColor, Tooltip, prelude::*,
+};
 use zed_actions::agent::ToggleModelSelector;
 
 use crate::CycleFavoriteModels;
@@ -302,17 +306,22 @@ enum ModelTier {
     Frontier,
 }
 
+/// Splits a model name, id, or settings key into lowercase words, so that
+/// "GPT-5 mini" and "gpt-5-mini" compare equal and "gemini" is not read as "mini".
+fn words(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 /// Infers the tier from the words of a model name or id, so that the same rule
 /// works across providers (e.g. "Claude Haiku 4.5", "gpt-5-mini", "gemini-2.5-pro").
 fn model_tier(model_name: &str) -> Option<ModelTier> {
     const FAST_WORDS: &[&str] = &["haiku", "flash", "lite", "mini", "nano"];
     const FRONTIER_WORDS: &[&str] = &["opus", "fable", "ultra", "pro"];
 
-    // Matching whole words keeps "gemini" from being read as "mini".
-    let words = model_name
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
+    let words = words(model_name);
     let has_any =
         |candidates: &[&str]| words.iter().any(|word| candidates.contains(&word.as_str()));
 
@@ -325,21 +334,96 @@ fn model_tier(model_name: &str) -> Option<ModelTier> {
     }
 }
 
-/// Returns a subtle tint for the model label, or `None` for mid-tier models,
-/// which keep the default color.
-pub fn model_tier_color(model_name: &str, cx: &App) -> Option<Color> {
+/// Finds the configured color whose key's words appear, in order, in one of the
+/// model's names. The key with the most words wins, then the first configured.
+fn configured_model_color(colors: &[(String, Hsla)], model_names: &[&str]) -> Option<Hsla> {
+    let model_words = model_names
+        .iter()
+        .map(|name| words(name))
+        .collect::<Vec<_>>();
+    colors
+        .iter()
+        .rev()
+        .filter_map(|(key, color)| {
+            let key_words = words(key);
+            let matches = !key_words.is_empty()
+                && model_words.iter().any(|name_words| {
+                    name_words
+                        .windows(key_words.len())
+                        .any(|window| window == key_words.as_slice())
+                });
+            matches.then_some((key_words.len(), *color))
+        })
+        .max_by_key(|(word_count, _)| *word_count)
+        .map(|(_, color)| color)
+}
+
+/// How a model or thinking effort label is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LabelColor {
+    /// The label's text is drawn in the color.
+    Text(Color),
+    /// The label sits on a background filled with the color.
+    Tag(TintColor),
+}
+
+impl LabelColor {
+    fn new(color: Hsla, style: AgentLabelStyle) -> Self {
+        match style {
+            AgentLabelStyle::Text => Self::Text(Color::Custom(color)),
+            AgentLabelStyle::Tag => Self::Tag(TintColor::Custom(color)),
+        }
+    }
+
+    pub fn label_color(self, cx: &App) -> Color {
+        match self {
+            Self::Text(color) => color,
+            Self::Tag(tint) => Color::Custom(tint.label_color(cx)),
+        }
+    }
+
+    /// Icons next to a text label keep their usual color; on a tag they take the
+    /// label's color so they stay readable.
+    pub fn icon_color(self, default: Color, cx: &App) -> Color {
+        match self {
+            Self::Text(_) => default,
+            Self::Tag(tint) => Color::Custom(tint.label_color(cx)),
+        }
+    }
+
+    pub fn button_style(self) -> ButtonStyle {
+        match self {
+            Self::Text(_) => ButtonStyle::default(),
+            Self::Tag(tint) => ButtonStyle::Tinted(tint),
+        }
+    }
+}
+
+/// Colors the label of a model from the user's settings, falling back to a tint
+/// by tier. `model_names` lists the names the model is known by, such as its
+/// display name and its id. Returns `None` for labels that keep the default look.
+pub fn model_label_color(model_names: &[&str], cx: &App) -> Option<LabelColor> {
+    let settings = &AgentSettings::get_global(cx).label_colors.model;
+    if let Some(color) = configured_model_color(&settings.colors, model_names) {
+        return Some(LabelColor::new(color, settings.style));
+    }
+
+    let tier = model_names.iter().find_map(|name| model_tier(name))?;
     let status = cx.theme().status();
-    let tier_color = match model_tier(model_name)? {
+    let tier_color = match tier {
         ModelTier::Fast => status.success,
         ModelTier::Frontier => status.info,
     };
-    // Only lean toward the tier color so the label stays as quiet as its neighbors.
-    Some(Color::Custom(
-        cx.theme()
+    let color = match settings.style {
+        // Only lean toward the tier color so the label stays as quiet as its neighbors.
+        AgentLabelStyle::Text => cx
+            .theme()
             .colors()
             .text_muted
             .blend(tier_color.opacity(0.6)),
-    ))
+        AgentLabelStyle::Tag => tier_color,
+    };
+    Some(LabelColor::new(color, settings.style))
 }
 
 /// How far `selected_value` sits above the `high` effort level: `0.0` at `high`,
@@ -359,14 +443,30 @@ fn effort_heat(level_values: &[&str], selected_value: &str) -> Option<f32> {
     Some(steps_above_high as f32 / levels_above_high as f32)
 }
 
-/// Colors the selected effort level by cost: levels up to `medium` keep the default
-/// color, `high` is yellow, and higher levels shade toward red at the maximum.
-pub fn effort_level_color(level_values: &[&str], selected_value: &str, cx: &App) -> Option<Color> {
-    let heat = effort_heat(level_values, selected_value)?;
-    let status = cx.theme().status();
-    Some(Color::Custom(
-        status.warning.blend(status.error.opacity(heat)),
-    ))
+/// Colors the label of the selected effort level from the user's settings, matched
+/// by the level's value or name. Otherwise colors it by cost: levels up to `medium`
+/// keep the default look, `high` is yellow, and higher levels shade toward red at
+/// the maximum.
+pub fn effort_label_color(
+    level_values: &[&str],
+    selected_value: &str,
+    selected_name: &str,
+    cx: &App,
+) -> Option<LabelColor> {
+    let settings = &AgentSettings::get_global(cx).label_colors.effort;
+    let configured_color = settings.colors.iter().find_map(|(key, color)| {
+        (key.eq_ignore_ascii_case(selected_value) || key.eq_ignore_ascii_case(selected_name))
+            .then_some(*color)
+    });
+    let color = match configured_color {
+        Some(color) => color,
+        None => {
+            let heat = effort_heat(level_values, selected_value)?;
+            let status = cx.theme().status();
+            status.warning.blend(status.error.opacity(heat))
+        }
+    };
+    Some(LabelColor::new(color, settings.style))
 }
 
 #[cfg(test)]
@@ -382,6 +482,40 @@ mod tests {
         assert_eq!(model_tier("gemini-2.5-pro"), Some(ModelTier::Frontier));
         assert_eq!(model_tier("Claude Sonnet 5.5"), None);
         assert_eq!(model_tier("gemini-3"), None);
+    }
+
+    #[test]
+    fn test_configured_model_color() {
+        let blue = gpui::blue();
+        let green = gpui::green();
+        let red = gpui::red();
+        let colors = vec![
+            ("opus".to_string(), blue),
+            ("GPT-5".to_string(), green),
+            ("gpt 5 mini".to_string(), red),
+        ];
+
+        assert_eq!(
+            configured_model_color(&colors, &["Claude Opus 5.5", "claude-opus-5-5"]),
+            Some(blue)
+        );
+        assert_eq!(configured_model_color(&colors, &["gpt-5"]), Some(green));
+        assert_eq!(
+            configured_model_color(&colors, &["GPT-5 Mini", "gpt-5-mini"]),
+            Some(red)
+        );
+        assert_eq!(configured_model_color(&colors, &["gpt-50"]), None);
+        assert_eq!(
+            configured_model_color(&colors, &["Claude Sonnet 5.5"]),
+            None
+        );
+        assert_eq!(
+            configured_model_color(
+                &[("opus".to_string(), blue), ("Opus".to_string(), red)],
+                &["opus"]
+            ),
+            Some(blue)
+        );
     }
 
     #[test]

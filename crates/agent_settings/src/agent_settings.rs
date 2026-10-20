@@ -10,11 +10,12 @@ use anyhow::Context as _;
 use collections::{HashSet, IndexMap};
 use fs::Fs;
 use futures::channel::oneshot;
-use gpui::{App, Pixels, SharedString, px};
+use gpui::{App, Hsla, Pixels, SharedString, px};
 use language_model::LanguageModel;
 use project::DisableAiSettings;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+pub use settings::AgentLabelStyle;
 use settings::{
     DockPosition, DockSide, IntoGpui, LanguageModelParameters, LanguageModelSelection,
     NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings, SettingsContent,
@@ -248,8 +249,22 @@ pub struct AgentSettings {
     pub message_editor_min_lines: usize,
     pub show_turn_stats: bool,
     pub show_merge_conflict_indicator: bool,
+    pub label_colors: AgentLabelColors,
     pub tool_permissions: ToolPermissions,
     pub sandbox_permissions: SandboxPermissions,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentLabelColors {
+    pub model: AgentLabelColor,
+    pub effort: AgentLabelColor,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentLabelColor {
+    pub style: AgentLabelStyle,
+    /// User colors in the order they were configured, keyed as written in the settings.
+    pub colors: Vec<(String, Hsla)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -844,9 +859,35 @@ impl Settings for AgentSettings {
             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),
             show_turn_stats: agent.show_turn_stats.unwrap(),
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
+            label_colors: compile_label_colors(agent.label_colors.unwrap_or_default()),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             sandbox_permissions: compile_sandbox_permissions(agent.sandbox_permissions),
         }
+    }
+}
+
+fn compile_label_colors(content: settings::AgentLabelColorsContent) -> AgentLabelColors {
+    AgentLabelColors {
+        model: compile_label_color(content.model.unwrap_or_default()),
+        effort: compile_label_color(content.effort.unwrap_or_default()),
+    }
+}
+
+fn compile_label_color(content: settings::AgentLabelColorContent) -> AgentLabelColor {
+    let colors = content
+        .colors
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, color)| {
+            let rgba = gpui::Rgba::try_from(&color)
+                .with_context(|| format!("invalid color {color:?} for agent label {key:?}"))
+                .log_err()?;
+            Some((key, Hsla::from(rgba)))
+        })
+        .collect();
+    AgentLabelColor {
+        style: content.style.unwrap_or_default(),
+        colors,
     }
 }
 

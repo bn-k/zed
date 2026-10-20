@@ -27,7 +27,7 @@ use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
-    TerminalToolHeader, effort_level_color,
+    TerminalToolHeader, effort_label_color,
 };
 use crate::unicode_confusables;
 
@@ -6111,20 +6111,31 @@ impl ThreadView {
         });
 
         let effective_effort = selected.clone().or(default_effort_level);
-        let effort_color = effective_effort.as_ref().and_then(|effort| {
-            let level_values = supported_effort_levels
-                .iter()
-                .map(|level| level.value.as_ref())
-                .collect::<Vec<_>>();
-            effort_level_color(&level_values, &effort.value, cx)
-        });
+        let menu_deployed = self.thinking_effort_menu_handle.is_deployed();
+        let colored_label = effective_effort
+            .as_ref()
+            .filter(|_| !menu_deployed)
+            .and_then(|effort| {
+                let level_values = supported_effort_levels
+                    .iter()
+                    .map(|level| level.value.as_ref())
+                    .collect::<Vec<_>>();
+                effort_label_color(&level_values, &effort.value, &effort.name, cx)
+            });
         let label = effective_effort.map_or("Select Effort".into(), |effort| effort.name);
 
-        let (label_color, icon) = if self.thinking_effort_menu_handle.is_deployed() {
+        let (label_color, icon) = if menu_deployed {
             (Color::Accent, IconName::ChevronUp)
         } else {
-            (effort_color.unwrap_or(Color::Muted), IconName::ChevronDown)
+            (
+                colored_label.map_or(Color::Muted, |label| label.label_color(cx)),
+                IconName::ChevronDown,
+            )
         };
+        let chevron_color =
+            colored_label.map_or(Color::Muted, |label| label.icon_color(Color::Muted, cx));
+        let thinking_icon_color =
+            colored_label.map_or(Color::Accent, |label| label.icon_color(Color::Accent, cx));
 
         let focus_handle = self.message_editor.focus_handle(cx);
         let show_cycle_row = supported_effort_levels.len() > 1;
@@ -6171,16 +6182,19 @@ impl ThreadView {
                     .child(
                         Icon::new(IconName::ThinkingMode)
                             .size(IconSize::Small)
-                            .color(Color::Accent),
+                            .color(thinking_icon_color),
                     )
                     .child(Label::new(label).size(LabelSize::Small).color(label_color))
-                    .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted)),
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(chevron_color)),
             )
         } else {
             ButtonLike::new_rounded_right("effort-selector-trigger")
                 .child(Label::new(label).size(LabelSize::Small).color(label_color))
-                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
-        };
+                .child(Icon::new(icon).size(IconSize::XSmall).color(chevron_color))
+        }
+        .when_some(colored_label, |this, label| {
+            this.style(label.button_style())
+        });
 
         PopoverMenu::new("effort-selector")
             .trigger_with_tooltip(

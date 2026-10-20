@@ -22,7 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use util::ResultExt as _;
 use zed_actions::agent::ToggleModelSelector;
 
-use crate::ui::{documentation_aside_side, effort_level_color, model_tier_color};
+use crate::ui::{LabelColor, documentation_aside_side, effort_label_color, model_label_color};
 use crate::{
     CycleFavoriteModels, CycleModeSelector, CycleThinkingEffort, ToggleProfileSelector,
     ToggleThinkingEffortMenu,
@@ -459,7 +459,11 @@ impl ConfigOptionSelector {
         }
     }
 
-    fn current_value_color(&self, option: &acp::SessionConfigOption, cx: &App) -> Option<Color> {
+    fn current_value_color(
+        &self,
+        option: &acp::SessionConfigOption,
+        cx: &App,
+    ) -> Option<LabelColor> {
         let acp::SessionConfigKind::Select(select) = &option.kind else {
             return None;
         };
@@ -470,11 +474,15 @@ impl ConfigOptionSelector {
                     .iter()
                     .map(|option| option.value.0.as_ref())
                     .collect::<Vec<_>>();
-                effort_level_color(&level_values, &select.current_value.0, cx)
+                effort_label_color(
+                    &level_values,
+                    &select.current_value.0,
+                    &self.current_value_name(),
+                    cx,
+                )
             }
             acp::SessionConfigOptionCategory::Model => {
-                model_tier_color(&self.current_value_name(), cx)
-                    .or_else(|| model_tier_color(&select.current_value.0, cx))
+                model_label_color(&[&self.current_value_name(), &select.current_value.0], cx)
             }
             _ => None,
         }
@@ -509,9 +517,7 @@ impl ConfigOptionSelector {
             IconName::ChevronDown
         };
 
-        let label_color = self
-            .current_value_color(&option, cx)
-            .unwrap_or(Color::Muted);
+        let colored_label = self.current_value_color(&option, cx);
 
         let value_name = self.current_value_name();
         let mut graphemes = value_name.graphemes(true);
@@ -527,8 +533,15 @@ impl ConfigOptionSelector {
             display_name,
         )
         .label_size(LabelSize::Small)
-        .color(label_color)
-        .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+        .color(colored_label.map_or(Color::Muted, |label| label.label_color(cx)))
+        .when_some(colored_label, |this, label| {
+            this.style(label.button_style())
+        })
+        .end_icon(
+            Icon::new(icon).size(IconSize::XSmall).color(
+                colored_label.map_or(Color::Muted, |label| label.icon_color(Color::Muted, cx)),
+            ),
+        )
         .disabled(self.setting_value)
     }
 }
