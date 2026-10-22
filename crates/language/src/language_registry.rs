@@ -602,6 +602,11 @@ impl LanguageRegistry {
         state.available_languages.find_by_exact_name(name)
     }
 
+    pub fn available_language_for_id(&self, id: LanguageId) -> Option<AvailableLanguage> {
+        let state = self.state.read();
+        state.available_languages.get_language(id).cloned()
+    }
+
     /// Look up a language by its modeline name (vim filetype or emacs mode).
     ///
     /// This performs a case-insensitive match against:
