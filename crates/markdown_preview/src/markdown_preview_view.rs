@@ -11,16 +11,17 @@ use anyhow::{Context as _, Result};
 use editor::items::open_resolved_target;
 use editor::scroll::Autoscroll;
 use editor::{
-    Editor, EditorEvent, EditorSettingsScrollbarProxy, MAX_TAB_TITLE_LEN, MultiBufferOffset,
-    SelectionEffects,
+    Editor, EditorEvent, EditorMode, EditorSettingsScrollbarProxy, MAX_TAB_TITLE_LEN, MultiBuffer,
+    MultiBufferOffset, SelectionEffects,
 };
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, Global, ImageSource, InteractiveElement, IntoElement, IsZero, Pixels, Render,
-    Resource, RetainAllImageCache, ScrollHandle, SharedString, SharedUri, Subscription, Task,
-    WeakEntity, Window, point, px,
+    Focusable, Global, ImageSource, InteractiveElement, IntoElement, IsZero, KeyDownEvent, Pixels,
+    Render, Resource, RetainAllImageCache, ScrollHandle, SharedString, SharedUri, Subscription,
+    Task, WeakEntity, Window, point, px,
 };
-use language::{Buffer, LanguageRegistry};
+use language::language_settings::SoftWrap;
+use language::{Anchor, Buffer, BufferEvent, LanguageRegistry, ToOffset};
 use markdown::{
     CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont,
     MarkdownOptions, MarkdownStyle,
@@ -86,6 +87,16 @@ pub struct MarkdownPreviewView {
     /// background parse is in flight. Tracked so matches can be invalidated once it lands.
     markdown_parse_pending: bool,
     nav_history: Option<ItemNavHistory>,
+    inline_edit: Option<InlineEdit>,
+}
+
+/// A block of the preview edited in place, as in Obsidian's live preview: an editor of the
+/// block's source, written through to the source buffer on every change.
+struct InlineEdit {
+    editor: Entity<Editor>,
+    source: Entity<Buffer>,
+    range: Range<Anchor>,
+    _subscriptions: [Subscription; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,6 +126,40 @@ impl MarkdownPreviewMode {
 struct EditorState {
     editor: Entity<Editor>,
     _subscription: Subscription,
+}
+
+impl InlineEdit {
+    fn source_range(&self, cx: &App) -> Range<usize> {
+        let snapshot = self.source.read(cx).snapshot();
+        self.range.start.to_offset(&snapshot)..self.range.end.to_offset(&snapshot)
+    }
+
+    /// The block's range in the source the preview last parsed, `parsed_source_len` long. The
+    /// source has changed since only through this block, so only the block's end moves.
+    fn parsed_range(&self, parsed_source_len: usize, cx: &App) -> Range<usize> {
+        let source_len = self.source.read(cx).len();
+        let range = self.source_range(cx);
+        let end = (range.end + parsed_source_len).saturating_sub(source_len);
+        range.start..end.max(range.start)
+    }
+}
+
+/// The part of `old` that `new` replaces, and the text that replaces it in `new`: what lies
+/// between their common prefix and their common suffix.
+fn changed_ranges(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+    let prefix = old
+        .char_indices()
+        .zip(new.chars())
+        .find(|((_, old_char), new_char)| old_char != new_char)
+        .map_or(old.len().min(new.len()), |((index, _), _)| index);
+    let suffix = old[prefix..]
+        .chars()
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(old_char, new_char)| old_char == new_char)
+        .map(|(old_char, _)| old_char.len_utf8())
+        .sum::<usize>();
+    (prefix..old.len() - suffix, prefix..new.len() - suffix)
 }
 
 #[derive(Default)]
@@ -431,6 +476,7 @@ impl MarkdownPreviewView {
                 mode,
                 markdown_parse_pending: false,
                 nav_history: None,
+                inline_edit: None,
             };
 
             this.set_editor(active_editor, window, cx);
@@ -592,6 +638,7 @@ impl MarkdownPreviewView {
 
         self.base_directory = Self::get_folder_for_active_editor(editor.read(cx), cx);
         self.hovered_url = None;
+        self.inline_edit = None;
         self.active_editor = Some(EditorState {
             editor,
             _subscription: subscription,
@@ -1156,34 +1203,48 @@ impl MarkdownPreviewView {
                 }
             });
 
+        if let Some(inline_edit) = &self.inline_edit {
+            let parsed_source_len = self.markdown.read(cx).parsed_source_len();
+            let range = inline_edit.parsed_range(parsed_source_len, cx);
+            markdown_element = markdown_element.replace_source_range(
+                range,
+                div()
+                    .occlude()
+                    .w_full()
+                    .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" {
+                            this.finish_inline_edit(window, cx);
+                            window.focus(&this.focus_handle, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(inline_edit.editor.clone()),
+            );
+        }
+
         if let Some(active_editor) = active_editor {
             let editor_for_checkbox = active_editor.clone();
             let view_handle = cx.entity().downgrade();
             let view_for_edit = view_handle.clone();
             markdown_element = markdown_element
-                .on_source_click(
-                    move |source_index, click_count, window, cx| match click_count {
-                        1 => {
-                            Self::change_selection_to_source_index(
-                                &active_editor,
-                                source_index,
-                                false,
-                                window,
-                                cx,
-                            );
-                            false
-                        }
-                        2 => {
-                            view_for_edit
-                                .update(cx, |view, cx| {
-                                    view.edit_at_source_index(source_index, window, cx)
-                                })
-                                .log_err();
-                            true
-                        }
-                        _ => false,
-                    },
-                )
+                .on_source_click(move |source_index, click_count, window, cx| {
+                    if click_count != 1 {
+                        return false;
+                    }
+                    Self::change_selection_to_source_index(
+                        &active_editor,
+                        source_index,
+                        false,
+                        window,
+                        cx,
+                    );
+                    view_for_edit
+                        .update(cx, |view, cx| {
+                            view.start_inline_edit(source_index, window, cx)
+                        })
+                        .log_err();
+                    true
+                })
                 .on_checkbox_toggle(move |source_range, new_checked, window, cx| {
                     Self::apply_checkbox_toggle_to_editor(
                         &editor_for_checkbox,
@@ -1242,32 +1303,127 @@ impl MarkdownPreviewView {
         }
     }
 
-    /// Puts the cursor of the source editor at `source_index` and focuses it: the editor beside the
-    /// preview when one is open, or the editor in place of the preview.
-    fn edit_at_source_index(
+    /// Replaces the block at `source_index` with an editor of its source, the cursor at that index.
+    fn start_inline_edit(
         &mut self,
         source_index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(editor) = self
+        let Some(source) = self
             .active_editor
             .as_ref()
-            .map(|state| state.editor.clone())
+            .and_then(|state| state.editor.read(cx).buffer().read(cx).as_singleton())
         else {
             return;
         };
-        Self::change_selection_to_source_index(&editor, source_index, false, window, cx);
-        let Some(workspace) = self.workspace.upgrade() else {
+        let Some(block) = self
+            .markdown
+            .read(cx)
+            .root_block_range_for_source_index(source_index)
+        else {
             return;
         };
-        let editor_is_open = workspace.read(cx).pane_for(&editor).is_some();
-        if editor_is_open {
-            workspace.update(cx, |workspace, cx| {
-                workspace.activate_item(&editor, true, true, window, cx);
+        let snapshot = source.read(cx).snapshot();
+        let block = block.start.min(snapshot.len())..block.end.min(snapshot.len());
+        let text: String = snapshot.text_for_range(block.clone()).collect();
+        let block = block.start..block.start + text.trim_end_matches('\n').len();
+        let text = text[..block.len()].to_string();
+        let range = snapshot.anchor_before(block.start)..snapshot.anchor_after(block.end);
+        let cursor = source_index.clamp(block.start, block.end) - block.start;
+
+        let language = source.read(cx).language().cloned();
+        let buffer = cx.new(|cx| {
+            let mut buffer = Buffer::local(text, cx);
+            buffer.set_language(language, cx);
+            buffer
+        });
+        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        let editor = cx.new(|cx| {
+            let mode = EditorMode::AutoHeight {
+                min_lines: 1,
+                max_lines: None,
+            };
+            let mut editor = Editor::new(mode, buffer, None, window, cx);
+            editor.set_soft_wrap_mode(SoftWrap::EditorWidth, cx);
+            editor.change_selections(SelectionEffects::default(), window, cx, |selections| {
+                selections.select_ranges([MultiBufferOffset(cursor)..MultiBufferOffset(cursor)])
             });
-        } else {
-            self.close_and_return_to_editor(&CloseAndReturnToEditor, window, cx);
+            editor
+        });
+        let subscriptions = [
+            cx.subscribe_in(&editor, window, |this, editor, event, window, cx| {
+                if this
+                    .inline_edit
+                    .as_ref()
+                    .is_none_or(|inline_edit| &inline_edit.editor != editor)
+                {
+                    return;
+                }
+                match event {
+                    EditorEvent::BufferEdited => this.write_inline_edit(cx),
+                    EditorEvent::Blurred => this.finish_inline_edit(window, cx),
+                    _ => {}
+                }
+            }),
+            cx.subscribe_in(&source, window, |this, _, event, window, cx| {
+                if matches!(event, BufferEvent::Edited { .. }) {
+                    this.read_inline_edit(window, cx);
+                }
+            }),
+        ];
+        window.focus(&editor.focus_handle(cx), cx);
+        self.inline_edit = Some(InlineEdit {
+            editor,
+            source,
+            range,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    /// Writes the text of the inline editor into the source, changing only what differs.
+    fn write_inline_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(inline_edit) = &self.inline_edit else {
+            return;
+        };
+        let new_text = inline_edit.editor.read(cx).text(cx);
+        let range = inline_edit.source_range(cx);
+        inline_edit.source.update(cx, |buffer, cx| {
+            let old_text: String = buffer.text_for_range(range.clone()).collect();
+            let (old_change, new_change) = changed_ranges(&old_text, &new_text);
+            if old_change.is_empty() && new_change.is_empty() {
+                return;
+            }
+            let start = range.start + old_change.start;
+            let end = range.start + old_change.end;
+            buffer.edit([(start..end, &new_text[new_change])], None, cx);
+        });
+    }
+
+    /// Brings a change made to the block's source elsewhere, as in the source editor, into the
+    /// inline editor.
+    fn read_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(inline_edit) = &self.inline_edit else {
+            return;
+        };
+        let source_text: String = inline_edit
+            .source
+            .read(cx)
+            .text_for_range(inline_edit.source_range(cx))
+            .collect();
+        if source_text != inline_edit.editor.read(cx).text(cx) {
+            inline_edit.editor.update(cx, |editor, cx| {
+                editor.set_text(source_text, window, cx);
+            });
+        }
+    }
+
+    /// Lays the edited block out again.
+    fn finish_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inline_edit.take().is_some() {
+            self.update_markdown_from_active_editor(false, false, window, cx);
+            cx.notify();
         }
     }
 
@@ -2467,9 +2623,107 @@ mod tests {
     };
 
     use super::{
-        MarkdownPreviewView, filter_non_rendered_matches, open_preview_url,
+        MarkdownPreviewView, changed_ranges, filter_non_rendered_matches, open_preview_url,
         reset_persisted_font_size,
     };
+
+    #[test]
+    fn changed_ranges_lie_between_the_common_prefix_and_suffix() {
+        assert_eq!(changed_ranges("two", "two"), (3..3, 3..3));
+        assert_eq!(changed_ranges("two", "t!wo"), (1..1, 1..2));
+        assert_eq!(changed_ranges("two", "to"), (1..2, 1..1));
+        assert_eq!(changed_ranges("été", "étè"), (3..5, 3..5));
+        assert_eq!(changed_ranges("aa", "aaa"), (2..2, 2..3));
+        assert_eq!(changed_ranges("", "new"), (0..0, 0..3));
+    }
+
+    #[gpui::test]
+    async fn edits_a_block_in_place_through_to_its_source(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(path!("/dir"), json!({ "doc.md": "one\n\ntwo\n\nthree\n" }))
+            .await;
+        cx.update(|cx| {
+            open_paths(
+                &[PathBuf::from(path!("/dir/doc.md"))],
+                app_state.clone(),
+                workspace::OpenOptions::default(),
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+
+        let multi_workspace = cx.update(|cx| cx.windows()[0].downcast::<MultiWorkspace>().unwrap());
+        let (preview, source) = multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                let workspace = multi_workspace.workspace().clone();
+                let editor: Entity<Editor> = workspace
+                    .read(cx)
+                    .active_item(cx)
+                    .and_then(|item| item.act_as::<Editor>(cx))
+                    .unwrap();
+                let source = editor.read(cx).buffer().read(cx).as_singleton().unwrap();
+                let preview = workspace.update(cx, |workspace, cx| {
+                    let preview =
+                        MarkdownPreviewView::create_markdown_view(workspace, editor, window, cx);
+                    workspace.active_pane().update(cx, |pane, cx| {
+                        pane.add_item(Box::new(preview.clone()), true, true, None, window, cx)
+                    });
+                    preview
+                });
+                (preview, source)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let inline_text = |cx: &mut TestAppContext| {
+            preview.read_with(cx, |preview, cx| {
+                preview
+                    .inline_edit
+                    .as_ref()
+                    .map(|inline_edit| inline_edit.editor.read(cx).text(cx))
+            })
+        };
+
+        multi_workspace
+            .update(cx, |_, window, cx| {
+                preview.update(cx, |preview, cx| preview.start_inline_edit(6, window, cx));
+            })
+            .unwrap();
+        assert_eq!(inline_text(cx).as_deref(), Some("two"));
+
+        multi_workspace
+            .update(cx, |_, window, cx| {
+                let editor = preview
+                    .read(cx)
+                    .inline_edit
+                    .as_ref()
+                    .unwrap()
+                    .editor
+                    .clone();
+                editor.update(cx, |editor, cx| editor.insert("!", window, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            source.read_with(cx, |source, _| source.text()),
+            "one\n\nt!wo\n\nthree\n"
+        );
+
+        source.update(cx, |source, cx| source.edit([(6..8, "w")], None, cx));
+        cx.run_until_parked();
+        assert_eq!(inline_text(cx).as_deref(), Some("two"));
+
+        multi_workspace
+            .update(cx, |_, window, cx| {
+                preview.update(cx, |preview, cx| preview.finish_inline_edit(window, cx));
+            })
+            .unwrap();
+        assert_eq!(inline_text(cx), None);
+    }
 
     #[gpui::test]
     fn previews_languages_built_on_the_markdown_grammar(cx: &mut TestAppContext) {
