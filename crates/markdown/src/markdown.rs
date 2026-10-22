@@ -47,8 +47,8 @@ use parser::CodeBlockMetadata;
 #[cfg(test)]
 use parser::parse_markdown_with_options;
 use parser::{
-    MarkdownEvent, MarkdownTag, MarkdownTagEnd, ParsedMetadataBlock, parse_links_only,
-    parse_markdown_with_wikilinks_option,
+    MarkdownEvent, MarkdownTag, MarkdownTagEnd, ParseExtensions, ParsedMetadataBlock,
+    parse_links_only, parse_markdown_with_extensions,
 };
 use pulldown_cmark::{Alignment, BlockQuoteKind};
 use sum_tree::TreeMap;
@@ -530,6 +530,8 @@ pub struct MarkdownOptions {
     pub render_metadata_blocks: bool,
     /// Reads `[[target]]` as a link and `![[target]]` as an image.
     pub parse_wikilinks: bool,
+    /// Keeps the line breaks of a paragraph whose every line is a `key: value` field.
+    pub break_key_lines: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1238,7 +1240,10 @@ impl Markdown {
         let should_render_mermaid_diagrams = self.options.render_mermaid_diagrams;
         let should_parse_heading_slugs = self.options.parse_heading_slugs;
         let should_parse_metadata_blocks = self.options.render_metadata_blocks;
-        let should_parse_wikilinks = self.options.parse_wikilinks;
+        let extensions = ParseExtensions {
+            wikilinks: self.options.parse_wikilinks,
+            key_lines: self.options.break_key_lines,
+        };
         let language_registry = self.language_registry.clone();
         let fallback = self.fallback_code_block_language.clone();
 
@@ -1264,12 +1269,12 @@ impl Markdown {
                 );
             }
 
-            let parsed = parse_markdown_with_wikilinks_option(
+            let parsed = parse_markdown_with_extensions(
                 &source,
                 should_parse_html,
                 should_parse_heading_slugs,
                 should_parse_metadata_blocks,
-                should_parse_wikilinks,
+                extensions,
             );
             let events = parsed.events;
             let language_names = parsed.language_names;
