@@ -399,6 +399,7 @@ impl MarkdownPreviewView {
                         parse_heading_slugs: true,
                         render_metadata_blocks: true,
                         parse_wikilinks: true,
+                        break_key_lines: true,
                         ..Default::default()
                     },
                     cx,

@@ -172,6 +172,20 @@ fn build_heading_slugs(
     slugs
 }
 
+/// Whether every line of `paragraph` starts with a field name and a colon, as `prix: 645 000.00 EUR`:
+/// letters, digits, `-` and `_`, then `:` before a space or the end of the line.
+fn is_key_lines(paragraph: &str) -> bool {
+    paragraph.trim_end().lines().all(|line| {
+        line.split_once(':').is_some_and(|(key, rest)| {
+            !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+    })
+}
+
 fn parse_metadata_table_rows(source: &str, source_range: Range<usize>) -> Option<Vec<MetadataRow>> {
     let mut rows = Vec::new();
     let mut line_start = source_range.start;
@@ -280,29 +294,37 @@ pub(crate) fn parse_markdown_with_options(
     parse_heading_slugs: bool,
     parse_metadata_blocks: bool,
 ) -> ParsedMarkdownData {
-    parse_markdown_with_wikilinks_option(
+    parse_markdown_with_extensions(
         text,
         parse_html,
         parse_heading_slugs,
         parse_metadata_blocks,
-        false,
+        ParseExtensions::default(),
     )
 }
 
-/// Like [`parse_markdown_with_options`], and reads `[[target]]` as a link and `![[target]]` as an
-/// image when `parse_wikilinks` is set.
-pub(crate) fn parse_markdown_with_wikilinks_option(
+/// Syntax beyond CommonMark and GFM, as written by note-taking tools such as Obsidian.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ParseExtensions {
+    /// Reads `[[target]]` as a link and `![[target]]` as an image.
+    pub wikilinks: bool,
+    /// Keeps the line breaks of a paragraph whose every line is a `key: value` field.
+    pub key_lines: bool,
+}
+
+pub(crate) fn parse_markdown_with_extensions(
     text: &str,
     parse_html: bool,
     parse_heading_slugs: bool,
     parse_metadata_blocks: bool,
-    parse_wikilinks: bool,
+    extensions: ParseExtensions,
 ) -> ParsedMarkdownData {
-    let body_options = if parse_wikilinks {
+    let body_options = if extensions.wikilinks {
         PARSE_OPTIONS.union(Options::ENABLE_WIKILINKS)
     } else {
         PARSE_OPTIONS
     };
+    let mut within_key_lines = false;
     let mut state = ParseState::default();
     let mut language_names = HashSet::default();
     let mut language_paths = HashSet::default();
@@ -464,7 +486,11 @@ pub(crate) fn parse_markdown_with_wikilinks_option(
 
                         MarkdownTag::CodeBlock { kind, metadata }
                     }
-                    pulldown_cmark::Tag::Paragraph => MarkdownTag::Paragraph,
+                    pulldown_cmark::Tag::Paragraph => {
+                        within_key_lines =
+                            extensions.key_lines && is_key_lines(&text[range.clone()]);
+                        MarkdownTag::Paragraph
+                    }
                     pulldown_cmark::Tag::Heading {
                         level,
                         id,
@@ -531,6 +557,9 @@ pub(crate) fn parse_markdown_with_wikilinks_option(
                 state.push_event(range, MarkdownEvent::Start(tag))
             }
             pulldown_cmark::Event::End(tag) => {
+                if let pulldown_cmark::TagEnd::Paragraph = tag {
+                    within_key_lines = false;
+                }
                 if let pulldown_cmark::TagEnd::Link = tag {
                     within_link = false;
                 } else if let pulldown_cmark::TagEnd::CodeBlock = tag {
@@ -749,6 +778,9 @@ pub(crate) fn parse_markdown_with_wikilinks_option(
                 range,
                 MarkdownEvent::FootnoteReference(SharedString::from(label.to_string())),
             ),
+            pulldown_cmark::Event::SoftBreak if within_key_lines => {
+                state.push_event(range, MarkdownEvent::HardBreak)
+            }
             pulldown_cmark::Event::SoftBreak => state.push_event(range, MarkdownEvent::SoftBreak),
             pulldown_cmark::Event::HardBreak => state.push_event(range, MarkdownEvent::HardBreak),
             pulldown_cmark::Event::Rule => state.push_event(range, MarkdownEvent::Rule),
@@ -1284,8 +1316,12 @@ mod tests {
     #[test]
     fn test_wikilinks_parse_only_when_asked() {
         let source = "See [[agents/marc-petit]].\n\n![[photos/facade.jpg]]";
-        let destinations = |parse_wikilinks| {
-            parse_markdown_with_wikilinks_option(source, false, false, false, parse_wikilinks)
+        let destinations = |wikilinks| {
+            let extensions = ParseExtensions {
+                wikilinks,
+                ..Default::default()
+            };
+            parse_markdown_with_extensions(source, false, false, false, extensions)
                 .events
                 .iter()
                 .filter_map(|(_, event)| match event {
@@ -1300,6 +1336,37 @@ mod tests {
             ["link agents/marc-petit", "image photos/facade.jpg"]
         );
         assert!(destinations(false).is_empty());
+    }
+
+    #[test]
+    fn test_key_lines_keep_their_line_breaks() {
+        let source = "prix: 645 000.00 EUR\nagent: [[agents/sophie-bernard]]\n\nAu calme d'une impasse,\nà dix minutes de Lyon: une maison.";
+        let breaks = |key_lines| {
+            let extensions = ParseExtensions {
+                wikilinks: true,
+                key_lines,
+            };
+            parse_markdown_with_extensions(source, false, false, false, extensions)
+                .events
+                .iter()
+                .filter_map(|(_, event)| match event {
+                    SoftBreak => Some("soft"),
+                    HardBreak => Some("hard"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(breaks(true), ["hard", "soft"]);
+        assert_eq!(breaks(false), ["soft", "soft"]);
+    }
+
+    #[test]
+    fn test_is_key_lines() {
+        assert!(is_key_lines("bien: maison\ncode-postal: 69300\n"));
+        assert!(is_key_lines("plan:\n"));
+        assert!(!is_key_lines("bien: maison\nvoir https://zed.dev\n"));
+        assert!(!is_key_lines("Prix de vente : 645 000 EUR"));
+        assert!(!is_key_lines("lien:https://zed.dev"));
     }
 
     #[test]
