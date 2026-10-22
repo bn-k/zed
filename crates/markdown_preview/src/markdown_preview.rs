@@ -3,6 +3,7 @@ use workspace::Workspace;
 
 pub mod markdown_preview_settings;
 pub mod markdown_preview_view;
+pub mod markdown_toolbar;
 
 pub use zed_actions::preview::markdown::{OpenPreview, OpenPreviewToTheSide};
 

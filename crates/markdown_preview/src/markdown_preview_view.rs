@@ -1059,7 +1059,7 @@ impl MarkdownPreviewView {
         cx.notify();
     }
 
-    fn close_and_return_to_editor(
+    pub(crate) fn close_and_return_to_editor(
         &mut self,
         _: &CloseAndReturnToEditor,
         window: &mut Window,
@@ -1423,6 +1423,11 @@ impl MarkdownPreviewView {
                 editor.set_text(source_text, window, cx);
             });
         }
+    }
+
+    /// The editor of the block edited in place, if any.
+    pub fn inline_editor(&self) -> Option<Entity<Editor>> {
+        Some(self.inline_edit.as_ref()?.editor.clone())
     }
 
     /// Lays the edited block out again.
@@ -2672,6 +2677,79 @@ mod tests {
                 .read_with(cx, |editor, cx| editor.text(cx))
                 .contains('!')
         );
+    }
+
+    #[gpui::test]
+    async fn the_toolbar_switches_views_and_formats_the_block_edited_in_place(
+        cx: &mut TestAppContext,
+    ) {
+        let (multi_workspace, editor) =
+            open_markdown_file(cx, "doc.md", "one\n\ntwo\n\nthree\n").await;
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        editor.update(cx, |editor, cx| {
+            let buffer = editor.buffer().read(cx).as_singleton().unwrap();
+            buffer.update(cx, |buffer, cx| {
+                let markdown = language::Language::new(markdown_language_config(), None);
+                buffer.set_language(Some(Arc::new(markdown)), cx)
+            });
+        });
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                let workspace = multi_workspace.workspace().clone();
+                let toolbar_item = workspace.update(cx, |workspace, cx| {
+                    cx.new(|_| crate::markdown_toolbar::MarkdownToolbar::new(workspace))
+                });
+                let pane = workspace.read(cx).active_pane().clone();
+                pane.update(cx, |pane, cx| {
+                    pane.toolbar()
+                        .update(cx, |toolbar, cx| toolbar.add_item(toolbar_item, window, cx))
+                });
+            })
+            .unwrap();
+        let active_item_is_preview = |cx: &mut VisualTestContext| {
+            multi_workspace
+                .update(cx, |multi_workspace, _, cx| {
+                    let workspace = multi_workspace.workspace().read(cx);
+                    workspace
+                        .active_item(cx)
+                        .is_some_and(|item| item.downcast::<MarkdownPreviewView>().is_some())
+                })
+                .unwrap()
+        };
+
+        click_tab_menu_target(cx, "markdown-show-preview", MouseButton::Left, 1);
+        cx.run_until_parked();
+        assert!(active_item_is_preview(cx));
+        let preview = multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                let workspace = multi_workspace.workspace().read(cx);
+                workspace
+                    .active_item(cx)
+                    .unwrap()
+                    .downcast::<MarkdownPreviewView>()
+            })
+            .unwrap()
+            .unwrap();
+
+        let preview_bounds = cx.debug_bounds("markdown-preview").unwrap();
+        let first_line = gpui::point(preview_bounds.center().x, preview_bounds.top() + px(24.));
+        cx.simulate_mouse_move(first_line, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(first_line, Modifiers::default());
+        cx.run_until_parked();
+        assert!(preview.read_with(cx, |preview, _| preview.inline_edit.is_some()));
+
+        click_tab_menu_target(cx, "markdown-heading-1", MouseButton::Left, 1);
+        cx.run_until_parked();
+        assert!(preview.read_with(cx, |preview, _| preview.inline_edit.is_some()));
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "# one\n\ntwo\n\nthree\n"
+        );
+
+        click_tab_menu_target(cx, "markdown-show-source", MouseButton::Left, 1);
+        cx.run_until_parked();
+        assert!(!active_item_is_preview(cx));
     }
 
     #[gpui::test]
