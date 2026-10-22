@@ -1209,6 +1209,7 @@ impl MarkdownPreviewView {
             markdown_element = markdown_element.replace_source_range(
                 range,
                 div()
+                    .debug_selector(|| "markdown-preview-inline-edit".into())
                     .occlude()
                     .w_full()
                     .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1238,11 +1239,16 @@ impl MarkdownPreviewView {
                         window,
                         cx,
                     );
-                    view_for_edit
-                        .update(cx, |view, cx| {
-                            view.start_inline_edit(source_index, window, cx)
-                        })
-                        .log_err();
+                    // The click is handled while the markdown is being updated, and the inline
+                    // edit reads it.
+                    let view_for_edit = view_for_edit.clone();
+                    window.defer(cx, move |window, cx| {
+                        view_for_edit
+                            .update(cx, |view, cx| {
+                                view.start_inline_edit(source_index, window, cx)
+                            })
+                            .log_err();
+                    });
                     true
                 })
                 .on_checkbox_toggle(move |source_range, new_checked, window, cx| {
@@ -2182,6 +2188,7 @@ impl Render for MarkdownPreviewView {
                 WithRemSize::new(preview_font_size).size_full().child(
                     div()
                         .id("markdown-preview-scroll-container")
+                        .debug_selector(|| "markdown-preview".into())
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll_handle)
@@ -2635,6 +2642,36 @@ mod tests {
         assert_eq!(changed_ranges("été", "étè"), (3..5, 3..5));
         assert_eq!(changed_ranges("aa", "aaa"), (2..2, 2..3));
         assert_eq!(changed_ranges("", "new"), (0..0, 0..3));
+    }
+
+    #[gpui::test]
+    async fn a_click_edits_a_block_in_place(cx: &mut TestAppContext) {
+        let (multi_workspace, editor) =
+            open_markdown_file(cx, "doc.md", "one\n\ntwo\n\nthree\n").await;
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let preview = open_preview_for_active_editor(cx, &multi_workspace);
+        cx.run_until_parked();
+
+        let preview_bounds = cx.debug_bounds("markdown-preview").unwrap();
+        let first_line = gpui::point(preview_bounds.center().x, preview_bounds.top() + px(24.));
+        cx.simulate_mouse_move(first_line, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(first_line, Modifiers::default());
+        cx.run_until_parked();
+        assert!(preview.read_with(cx, |preview, _| preview.inline_edit.is_some()));
+
+        let inline_edit = cx
+            .debug_bounds("markdown-preview-inline-edit")
+            .expect("the block is edited in place");
+        cx.simulate_click(inline_edit.center(), Modifiers::default());
+        cx.simulate_input("!");
+        cx.run_until_parked();
+        assert!(preview.read_with(cx, |preview, _| preview.inline_edit.is_some()));
+        assert!(
+            editor
+                .read_with(cx, |editor, cx| editor.text(cx))
+                .contains('!')
+        );
     }
 
     #[gpui::test]
