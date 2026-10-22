@@ -332,6 +332,8 @@ pub(crate) fn parse_markdown_with_extensions(
     let mut html_blocks = BTreeMap::default();
     let mut metadata_blocks = BTreeMap::default();
     let mut within_link = false;
+    // Within `[[target]]`, written without a label after `|`.
+    let mut within_bare_wikilink = false;
     let mut within_code_block = false;
     let mut within_metadata = false;
     let mut within_table = false;
@@ -419,6 +421,8 @@ pub(crate) fn parse_markdown_with_extensions(
                         id,
                     } => {
                         within_link = true;
+                        within_bare_wikilink =
+                            matches!(link_type, LinkType::WikiLink { has_pothole: false });
                         MarkdownTag::Link {
                             link_type,
                             dest_url: SharedString::from(dest_url.into_string()),
@@ -562,6 +566,7 @@ pub(crate) fn parse_markdown_with_extensions(
                 }
                 if let pulldown_cmark::TagEnd::Link = tag {
                     within_link = false;
+                    within_bare_wikilink = false;
                 } else if let pulldown_cmark::TagEnd::CodeBlock = tag {
                     within_code_block = false;
                 } else if let pulldown_cmark::TagEnd::MetadataBlock(_) = tag {
@@ -615,6 +620,14 @@ pub(crate) fn parse_markdown_with_extensions(
 
                 if within_code_block {
                     let (range, event) = event_for(text, range, &parsed);
+                    state.push_event(range, event);
+                    continue;
+                }
+
+                // `[[../customers/hanar]]` reads "hanar", as Obsidian shows a note by its name.
+                if within_bare_wikilink {
+                    let name = parsed.rsplit('/').next().unwrap_or_default();
+                    let (range, event) = event_for(text, range, name);
                     state.push_event(range, event);
                     continue;
                 }
@@ -1336,6 +1349,37 @@ mod tests {
             ["link agents/marc-petit", "image photos/facade.jpg"]
         );
         assert!(destinations(false).is_empty());
+    }
+
+    #[test]
+    fn test_wikilinks_show_the_name_of_their_target() {
+        let source = "[[../customers/hanar]], [[hanar]] and [[../customers/hanar|Hanari Carnes]]";
+        let extensions = ParseExtensions {
+            wikilinks: true,
+            ..Default::default()
+        };
+        let parsed = parse_markdown_with_extensions(source, false, false, false, extensions);
+        let link_texts = parsed
+            .events
+            .iter()
+            .scan(false, |within_link, (range, event)| {
+                Some(match event {
+                    Start(Link { .. }) => {
+                        *within_link = true;
+                        None
+                    }
+                    End(MarkdownTagEnd::Link) => {
+                        *within_link = false;
+                        None
+                    }
+                    Text if *within_link => Some(source[range.clone()].to_string()),
+                    SubstitutedText(text) if *within_link => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(link_texts, ["hanar", "hanar", "Hanari Carnes"]);
     }
 
     #[test]
