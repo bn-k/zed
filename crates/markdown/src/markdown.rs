@@ -1073,6 +1073,17 @@ impl Markdown {
         &self.parsed_markdown
     }
 
+    /// The length of the source last parsed, which lags behind `source` while a parse runs.
+    pub fn parsed_source_len(&self) -> usize {
+        self.parsed_markdown.source.len()
+    }
+
+    /// The range of the root block that holds `source_index`, in the source last parsed.
+    pub fn root_block_range_for_source_index(&self, source_index: usize) -> Option<Range<usize>> {
+        self.parsed_markdown
+            .root_block_range_for_source_index(source_index)
+    }
+
     pub fn escape(s: &str) -> Cow<'_, str> {
         let output_len: usize = {
             let mut escaper = MarkdownEscaper::new();
@@ -1611,6 +1622,17 @@ impl ParsedMarkdown {
         Some(partition.saturating_sub(1))
     }
 
+    /// The source range of the root block that holds `source_index`, or of the last block
+    /// before it.
+    pub fn root_block_range_for_source_index(&self, source_index: usize) -> Option<Range<usize>> {
+        let block = self.root_block_for_source_index(source_index)?;
+        self.events
+            .iter()
+            .filter(|(_, event)| matches!(event, MarkdownEvent::RootStart))
+            .nth(block)
+            .map(|(range, _)| range.clone())
+    }
+
     /// Extracts the markdown source for a selection, rebalancing inline
     /// delimiters (`**`, backticks, link syntax, etc.) so partial selections of
     /// styled spans stay well-formed.
@@ -1755,6 +1777,7 @@ pub struct MarkdownElement {
     on_mermaid_zoom: Option<MermaidZoomCallback>,
     image_resolver: Option<Box<dyn Fn(&str, &App) -> Option<ImageSource>>>,
     show_root_block_markers: bool,
+    source_replacement: Option<(Range<usize>, AnyElement)>,
     autoscroll: AutoscrollBehavior,
     /// Test-only hook to observe the laid-out text when this element is
     /// rendered beneath a view, where the layout state isn't otherwise
@@ -1782,6 +1805,7 @@ impl MarkdownElement {
             on_mermaid_zoom: None,
             image_resolver: None,
             show_root_block_markers: false,
+            source_replacement: None,
             autoscroll: AutoscrollBehavior::Propagate,
             #[cfg(test)]
             on_render: None,
@@ -1888,9 +1912,42 @@ impl MarkdownElement {
         self
     }
 
+    /// Renders `element` in place of the root blocks that overlap `source_range`, such as an
+    /// editor of that source. When no block overlaps it, as when its source was deleted, the
+    /// element goes where the range starts.
+    pub fn replace_source_range(
+        mut self,
+        source_range: Range<usize>,
+        element: impl IntoElement,
+    ) -> Self {
+        self.source_replacement = Some((source_range, element.into_any_element()));
+        self
+    }
+
     pub fn scroll_handle(mut self, scroll_handle: ScrollHandle) -> Self {
         self.autoscroll = AutoscrollBehavior::Controlled(scroll_handle);
         self
+    }
+
+    fn push_source_replacement(
+        &self,
+        builder: &mut MarkdownElementBuilder,
+        range: &Range<usize>,
+        markdown_end: usize,
+        element: AnyElement,
+        cx: &App,
+    ) {
+        if self.show_root_block_markers {
+            builder.push_root_block(range, markdown_end);
+            builder.append_child(element);
+            builder.pop_root_block(
+                true,
+                cx.theme().colors().border,
+                cx.theme().colors().border_variant,
+            );
+        } else {
+            builder.append_child(element);
+        }
     }
 
     fn push_markdown_code_span(
@@ -2657,8 +2714,18 @@ impl Element for MarkdownElement {
         let mut handled_html_block = false;
         let mut rendered_mermaid_block = false;
         let mut rendered_metadata_block = false;
+        let replaced_range = self
+            .source_replacement
+            .as_ref()
+            .map(|(range, _)| range.clone());
+        let mut replacement = self.source_replacement.take().map(|(_, element)| element);
+        let mut skipping_replaced_block = false;
         for (index, (range, event)) in parsed_markdown.events.iter().enumerate() {
             let event_index = MarkdownEventIndex(index);
+            if skipping_replaced_block {
+                skipping_replaced_block = !matches!(event, MarkdownEvent::RootEnd(_));
+                continue;
+            }
             // Skip alt text for images that rendered
             if let Some(current_img_block_range) = &current_img_block_range
                 && current_img_block_range.end > range.end
@@ -2690,6 +2757,24 @@ impl Element for MarkdownElement {
 
             match event {
                 MarkdownEvent::RootStart => {
+                    if let Some(replaced) = &replaced_range {
+                        let overlaps = range.start < replaced.end && replaced.start < range.end;
+                        if (overlaps || range.start >= replaced.end)
+                            && let Some(element) = replacement.take()
+                        {
+                            self.push_source_replacement(
+                                &mut builder,
+                                replaced,
+                                markdown_end,
+                                element,
+                                cx,
+                            );
+                        }
+                        if overlaps {
+                            skipping_replaced_block = true;
+                            continue;
+                        }
+                    }
                     if self.show_root_block_markers {
                         builder.push_root_block(range, markdown_end);
                     }
@@ -3373,6 +3458,9 @@ impl Element for MarkdownElement {
                     builder.pop_text_style();
                 }
             }
+        }
+        if let (Some(replaced), Some(element)) = (&replaced_range, replacement.take()) {
+            self.push_source_replacement(&mut builder, replaced, markdown_end, element, cx);
         }
         if self.style.code_block_overflow_x_scroll {
             let code_block_ids = code_block_ids;
@@ -8758,6 +8846,36 @@ mod tests {
             },
         );
         rendered.text
+    }
+
+    #[gpui::test]
+    fn test_replace_source_range_hides_the_blocks_it_overlaps(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| Markdown::new("one\n\ntwo\n\nthree".into(), None, None, cx));
+        cx.run_until_parked();
+
+        let mut render = |range: Range<usize>| {
+            let (rendered, _) = cx.draw(
+                Default::default(),
+                size(px(600.0), px(600.0)),
+                |_window, _cx| {
+                    MarkdownElement::new(markdown.clone(), MarkdownStyle::default())
+                        .replace_source_range(range, div())
+                },
+            );
+            rendered
+                .text
+                .lines
+                .iter()
+                .map(|line| line.layout.wrapped_text())
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert_eq!(render(5..8), "one|three");
+        assert_eq!(render(0..8), "three");
+        assert_eq!(render(5..5), "one|two|three");
+        assert_eq!(render(15..15), "one|two|three");
     }
 
     fn test_image(cx: &mut TestAppContext) -> Arc<RenderImage> {
