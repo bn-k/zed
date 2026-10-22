@@ -40,6 +40,10 @@ impl AvailableLanguage {
         &self.matcher
     }
 
+    pub fn grammar(&self) -> Option<&Arc<str>> {
+        self.grammar.as_ref()
+    }
+
     pub fn hidden(&self) -> bool {
         self.hidden
     }

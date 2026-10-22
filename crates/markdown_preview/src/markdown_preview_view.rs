@@ -398,6 +398,7 @@ impl MarkdownPreviewView {
                         render_mermaid_diagrams: true,
                         parse_heading_slugs: true,
                         render_metadata_blocks: true,
+                        parse_wikilinks: true,
                         ..Default::default()
                     },
                     cx,
@@ -484,11 +485,7 @@ impl MarkdownPreviewView {
     pub fn is_markdown_path(path: impl AsRef<Path>, languages: &Arc<LanguageRegistry>) -> bool {
         languages
             .language_for_file_path(path.as_ref())
-            .is_some_and(|language_id| {
-                languages
-                    .available_language_for_name("Markdown")
-                    .is_some_and(|markdown| markdown.id() == language_id)
-            })
+            .is_some_and(|language_id| is_markdown_language_id(language_id, languages))
     }
 
     pub fn open_for_project_path(
@@ -527,7 +524,7 @@ impl MarkdownPreviewView {
         if let Some(buffer) = buffer.as_singleton()
             && let Some(language) = buffer.read(cx).language()
         {
-            return language.name() == "Markdown";
+            return is_markdown_language(language);
         }
         false
     }
@@ -538,16 +535,15 @@ impl MarkdownPreviewView {
         };
         let buffer = buffer.read(cx);
         if let Some(language) = buffer.language() {
-            return language.name() == "Markdown";
+            return is_markdown_language(language);
         }
         let Some(file) = buffer.file() else {
             return false;
         };
         let languages = workspace.project().read(cx).languages().clone();
-        let Some(markdown) = languages.available_language_for_name("Markdown") else {
-            return false;
-        };
-        languages.language_for_file(file, None, cx) == Some(markdown.id())
+        languages
+            .language_for_file(file, None, cx)
+            .is_some_and(|language_id| is_markdown_language_id(language_id, &languages))
     }
 
     fn set_editor(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1162,19 +1158,31 @@ impl MarkdownPreviewView {
         if let Some(active_editor) = active_editor {
             let editor_for_checkbox = active_editor.clone();
             let view_handle = cx.entity().downgrade();
+            let view_for_edit = view_handle.clone();
             markdown_element = markdown_element
-                .on_source_click(move |source_index, click_count, window, cx| {
-                    if click_count == 1 {
-                        Self::change_selection_to_source_index(
-                            &active_editor,
-                            source_index,
-                            false,
-                            window,
-                            cx,
-                        );
-                    }
-                    false
-                })
+                .on_source_click(
+                    move |source_index, click_count, window, cx| match click_count {
+                        1 => {
+                            Self::change_selection_to_source_index(
+                                &active_editor,
+                                source_index,
+                                false,
+                                window,
+                                cx,
+                            );
+                            false
+                        }
+                        2 => {
+                            view_for_edit
+                                .update(cx, |view, cx| {
+                                    view.edit_at_source_index(source_index, window, cx)
+                                })
+                                .log_err();
+                            true
+                        }
+                        _ => false,
+                    },
+                )
                 .on_checkbox_toggle(move |source_range, new_checked, window, cx| {
                     Self::apply_checkbox_toggle_to_editor(
                         &editor_for_checkbox,
@@ -1232,6 +1240,87 @@ impl MarkdownPreviewView {
             });
         }
     }
+
+    /// Puts the cursor of the source editor at `source_index` and focuses it: the editor beside the
+    /// preview when one is open, or the editor in place of the preview.
+    fn edit_at_source_index(
+        &mut self,
+        source_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self
+            .active_editor
+            .as_ref()
+            .map(|state| state.editor.clone())
+        else {
+            return;
+        };
+        Self::change_selection_to_source_index(&editor, source_index, false, window, cx);
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let editor_is_open = workspace.read(cx).pane_for(&editor).is_some();
+        if editor_is_open {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_item(&editor, true, true, window, cx);
+            });
+        } else {
+            self.close_and_return_to_editor(&CloseAndReturnToEditor, window, cx);
+        }
+    }
+
+    /// The extension of the file being previewed, as `kan` for `maison.kan`.
+    fn source_extension(&self, cx: &App) -> Option<String> {
+        let editor = self.active_editor.as_ref()?.editor.read(cx);
+        let file = editor.file_at(MultiBufferOffset(0), cx)?;
+        let file_name = file.file_name(cx);
+        Some(Path::new(file_name).extension()?.to_str()?.to_string())
+    }
+}
+
+/// Whether the preview renders a language: Markdown itself, or a language built on its grammar.
+fn is_markdown_language(language: &language::Language) -> bool {
+    language.name() == "Markdown" || language.config().grammar.as_deref() == Some("markdown")
+}
+
+fn is_markdown_language_id(
+    language_id: language::LanguageId,
+    languages: &LanguageRegistry,
+) -> bool {
+    languages
+        .available_language_for_id(language_id)
+        .is_some_and(|language| {
+            language.name() == "Markdown"
+                || language
+                    .grammar()
+                    .is_some_and(|grammar| grammar.as_ref() == "markdown")
+        })
+}
+
+/// A local link without an extension, as `[[agents/sophie-bernard]]` writes it, names a document of the
+/// previewed file's own kind: `agents/sophie-bernard.kan` from a `.kan` document, when that file exists.
+fn with_source_extension(
+    path: &str,
+    view: &WeakEntity<MarkdownPreviewView>,
+    base_directory: Option<&Path>,
+    cx: &App,
+) -> String {
+    if path.contains(':') || Path::new(path).extension().is_some() {
+        return path.to_string();
+    }
+    let Some(extension) = view
+        .upgrade()
+        .and_then(|view| view.read(cx).source_extension(cx))
+    else {
+        return path.to_string();
+    };
+    let candidate = format!("{path}.{extension}");
+    let exists = match base_directory {
+        Some(base_directory) => base_directory.join(&candidate).is_file(),
+        None => Path::new(&candidate).is_file(),
+    };
+    if exists { candidate } else { path.to_string() }
 }
 
 fn handle_url_click(
@@ -1275,8 +1364,9 @@ fn handle_url_click(
             });
         }
     } else {
+        let path = with_source_extension(path_part, view, base_directory.as_deref(), cx);
         open_preview_url(
-            SharedString::from(path_part.to_string()),
+            SharedString::from(path),
             fragment.map(|fragment| SharedString::from(fragment.to_string())),
             base_directory,
             Some(view.clone()),
@@ -2379,6 +2469,35 @@ mod tests {
         MarkdownPreviewView, filter_non_rendered_matches, open_preview_url,
         reset_persisted_font_size,
     };
+
+    #[gpui::test]
+    fn previews_languages_built_on_the_markdown_grammar(cx: &mut TestAppContext) {
+        let languages = Arc::new(language::LanguageRegistry::test(cx.executor()));
+        let language = |name: &'static str, grammar: &str, suffix: &str| language::LanguageConfig {
+            name: name.into(),
+            grammar: Some(grammar.into()),
+            matcher: Arc::new(language::LanguageMatcher {
+                path_suffixes: vec![suffix.into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        languages.register_test_language(language("Markdown", "markdown", "md"));
+        languages.register_test_language(language("Kanon", "markdown", "kan"));
+        languages.register_test_language(language("Rust", "rust", "rs"));
+
+        assert!(MarkdownPreviewView::is_markdown_path(
+            "README.md",
+            &languages
+        ));
+        assert!(MarkdownPreviewView::is_markdown_path(
+            "maison.kan",
+            &languages
+        ));
+        assert!(!MarkdownPreviewView::is_markdown_path(
+            "main.rs", &languages
+        ));
+    }
 
     #[test]
     fn filters_matches_in_non_rendered_link_source() {

@@ -273,12 +273,36 @@ fn yaml_frontmatter_candidate(text: &str) -> Option<&str> {
     None
 }
 
+#[cfg(test)]
 pub(crate) fn parse_markdown_with_options(
     text: &str,
     parse_html: bool,
     parse_heading_slugs: bool,
     parse_metadata_blocks: bool,
 ) -> ParsedMarkdownData {
+    parse_markdown_with_wikilinks_option(
+        text,
+        parse_html,
+        parse_heading_slugs,
+        parse_metadata_blocks,
+        false,
+    )
+}
+
+/// Like [`parse_markdown_with_options`], and reads `[[target]]` as a link and `![[target]]` as an
+/// image when `parse_wikilinks` is set.
+pub(crate) fn parse_markdown_with_wikilinks_option(
+    text: &str,
+    parse_html: bool,
+    parse_heading_slugs: bool,
+    parse_metadata_blocks: bool,
+    parse_wikilinks: bool,
+) -> ParsedMarkdownData {
+    let body_options = if parse_wikilinks {
+        PARSE_OPTIONS.union(Options::ENABLE_WIKILINKS)
+    } else {
+        PARSE_OPTIONS
+    };
     let mut state = ParseState::default();
     let mut language_names = HashSet::default();
     let mut language_paths = HashSet::default();
@@ -311,7 +335,7 @@ pub(crate) fn parse_markdown_with_options(
         }
     }
     let body_start = frontmatter.last().map_or(0, |(_, range)| range.end);
-    let parser = Parser::new_ext(&text[body_start..], PARSE_OPTIONS);
+    let parser = Parser::new_ext(&text[body_start..], body_options);
     let mut link_definition_spans = parser
         .reference_definitions()
         .iter()
@@ -1044,10 +1068,9 @@ mod tests {
     use super::MarkdownTag::*;
     use super::*;
 
-    const CONDITIONAL_OPTIONS: Options = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
-    const UNWANTED_OPTIONS: Options = Options::ENABLE_MATH
-        .union(Options::ENABLE_DEFINITION_LIST)
-        .union(Options::ENABLE_WIKILINKS);
+    const CONDITIONAL_OPTIONS: Options =
+        Options::ENABLE_YAML_STYLE_METADATA_BLOCKS.union(Options::ENABLE_WIKILINKS);
+    const UNWANTED_OPTIONS: Options = Options::ENABLE_MATH.union(Options::ENABLE_DEFINITION_LIST);
 
     #[test]
     fn all_options_considered() {
@@ -1256,6 +1279,27 @@ mod tests {
                 .iter()
                 .all(|(_, event)| !matches!(event, Start(Link { .. })))
         );
+    }
+
+    #[test]
+    fn test_wikilinks_parse_only_when_asked() {
+        let source = "See [[agents/marc-petit]].\n\n![[photos/facade.jpg]]";
+        let destinations = |parse_wikilinks| {
+            parse_markdown_with_wikilinks_option(source, false, false, false, parse_wikilinks)
+                .events
+                .iter()
+                .filter_map(|(_, event)| match event {
+                    Start(Link { dest_url, .. }) => Some(format!("link {dest_url}")),
+                    Start(Image { dest_url, .. }) => Some(format!("image {dest_url}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            destinations(true),
+            ["link agents/marc-petit", "image photos/facade.jpg"]
+        );
+        assert!(destinations(false).is_empty());
     }
 
     #[test]
