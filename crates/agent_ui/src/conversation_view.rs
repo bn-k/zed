@@ -6129,6 +6129,37 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_new_thread_does_not_follow_agent_by_default(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        active_thread(&conversation_view, cx).read_with(cx, |view, _| {
+            assert!(!view.should_be_following);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_new_thread_follows_agent_when_follow_agent_by_default(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            AgentSettings::override_global(
+                AgentSettings {
+                    follow_agent_by_default: true,
+                    ..AgentSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        active_thread(&conversation_view, cx).read_with(cx, |view, _| {
+            assert!(view.should_be_following);
+        });
+    }
+
+    #[gpui::test]
     async fn test_reported_stale_stop_and_token_limit_do_not_send_queue(cx: &mut TestAppContext) {
         init_test(cx);
         let connection = StubAgentConnection::new().with_receipt_submissions(true);

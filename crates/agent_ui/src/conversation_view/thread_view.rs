@@ -1309,7 +1309,7 @@ impl ThreadView {
             plan_expanded: false,
             queue_expanded: true,
             editor_expanded: false,
-            should_be_following: false,
+            should_be_following: AgentSettings::get_global(cx).follow_agent_by_default,
             editing_message: None,
             message_queue: MessageQueue::default(),
             turn_fields: TurnFields::default(),

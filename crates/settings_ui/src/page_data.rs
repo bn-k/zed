@@ -9134,6 +9134,29 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Follow Agent By Default",
+                description: "Whether new agent threads start with \"Follow Agent\" enabled, so the editor tracks the agent's location as it reads and edits files.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.follow_agent_by_default"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .follow_agent_by_default
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .follow_agent_by_default = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Terminal Thread Init Command",
                 description: "Command to automatically run when Zed creates a Terminal Thread shell in the agent panel. Runs in your configured shell.",
                 field: Box::new(SettingField {
