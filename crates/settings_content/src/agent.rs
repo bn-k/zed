@@ -361,6 +361,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub expand_terminal_card: Option<bool>,
+    /// Whether new agent threads start with "Follow Agent" enabled, so the editor tracks
+    /// the agent's location as it reads and edits files.
+    ///
+    /// Default: false
+    pub follow_agent_by_default: Option<bool>,
     /// Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
     /// The command is sent to the shell as if typed, so it is interpreted by your
     /// configured shell (including on Windows and remote/WSL projects).
